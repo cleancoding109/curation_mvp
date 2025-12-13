@@ -1,0 +1,128 @@
+# Metadata-Driven Spark Batch Framework Job
+# This job processes Bronze (Lakeflow Streaming Tables) to Silver (Delta Tables)
+# using high-watermark incremental patterns and SCD Type 1/2 merge strategies.
+
+resources:
+  jobs:
+    curation_framework_job:
+      name: curation_framework_silver_batch_job
+
+      trigger:
+        # Run every hour for near-real-time batch processing
+        periodic:
+          interval: 1
+          unit: HOURS
+
+      # Job parameters - can be overridden at runtime
+      parameters:
+        - name: config_path
+          default: conf/tables_config.json
+        - name: tables
+          default: ""  # Empty = process all tables, or comma-separated list
+
+      email_notifications:
+        on_failure:
+          - cleancoding109@gmail.com
+        on_success:
+          - cleancoding109@gmail.com
+
+      tags:
+        project: curation_framework
+        layer: silver
+        processing_type: batch
+        framework: metadata_driven
+
+      tasks:
+        # Task 1: Run the Silver Batch Processing
+        - task_key: silver_batch_processing
+          description: "Process Bronze to Silver using metadata-driven batch framework"
+          
+          # Use serverless compute for cost efficiency
+          environment_key: default
+          
+          python_wheel_task:
+            package_name: curation_framework
+            entry_point: main
+            parameters:
+              - --config_path
+              - "{{job.parameters.config_path}}"
+              - --tables
+              - "{{job.parameters.tables}}"
+
+          # Retry configuration
+          max_retries: 2
+          min_retry_interval_millis: 60000
+
+          # Timeout after 2 hours
+          timeout_seconds: 7200
+
+      # Environment specification
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "2"
+            client: "1"
+            dependencies:
+              - ../dist/*.whl
+              - delta-spark>=3.0.0
+
+      # Job cluster configuration (alternative to serverless)
+      job_clusters:
+        - job_cluster_key: batch_cluster
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            node_type_id: "Standard_DS3_v2"
+            num_workers: 2
+            spark_conf:
+              spark.sql.shuffle.partitions: "200"
+              spark.sql.adaptive.enabled: "true"
+              spark.sql.adaptive.coalescePartitions.enabled: "true"
+              spark.databricks.delta.optimizeWrite.enabled: "true"
+              spark.databricks.delta.autoCompact.enabled: "true"
+            azure_attributes:
+              availability: ON_DEMAND_AZURE
+              first_on_demand: 1
+              spot_bid_max_price: -1
+
+    # Separate job for processing individual tables (on-demand)
+    curation_framework_single_table_job:
+      name: curation_framework_single_table_job
+
+      # No trigger - run on-demand only
+      
+      parameters:
+        - name: config_path
+          default: conf/tables_config.json
+        - name: table_name
+          default: ""
+
+      tags:
+        project: curation_framework
+        layer: silver
+        processing_type: batch_single
+
+      tasks:
+        - task_key: process_single_table
+          description: "Process a single table from Bronze to Silver"
+          
+          environment_key: default
+          
+          python_wheel_task:
+            package_name: curation_framework
+            entry_point: main
+            parameters:
+              - --config_path
+              - "{{job.parameters.config_path}}"
+              - --tables
+              - "{{job.parameters.table_name}}"
+
+          timeout_seconds: 3600
+
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "2"
+            client: "1"
+            dependencies:
+              - ../dist/*.whl
+              - delta-spark>=3.0.0

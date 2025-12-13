@@ -1,0 +1,61 @@
+{
+  "tables": [
+    {
+      "table_name": "silver_orders",
+      "source_table": "bronze.orders_streaming",
+      "target_table": "silver.orders",
+      "scd_type": 1,
+      "business_key_columns": ["order_id"],
+      "watermark_column": "ingestion_ts",
+      "target_watermark_column": "processing_timestamp",
+      "transformation_sql_path": "conf/sql/orders_transform.sql",
+      "enabled": true,
+      "description": "Orders table with SCD Type 1 (Upsert)"
+    },
+    {
+      "table_name": "silver_customers",
+      "source_table": "bronze.customers_streaming",
+      "target_table": "silver.customers",
+      "scd_type": 2,
+      "business_key_columns": ["customer_id"],
+      "watermark_column": "ingestion_ts",
+      "target_watermark_column": "processing_timestamp",
+      "scd2_columns": {
+        "effective_start_date": "effective_start_date",
+        "effective_end_date": "effective_end_date",
+        "is_current": "is_current"
+      },
+      "track_columns": ["customer_name", "email", "phone", "address", "city", "state", "country"],
+      "transformation_sql_path": "conf/sql/customers_transform.sql",
+      "enabled": true,
+      "description": "Customers table with SCD Type 2 (History tracking)"
+    },
+    {
+      "table_name": "silver_products",
+      "source_table": "bronze.products_streaming",
+      "target_table": "silver.products",
+      "scd_type": 2,
+      "business_key_columns": ["product_id", "region_code"],
+      "watermark_column": "ingestion_ts",
+      "target_watermark_column": "processing_timestamp",
+      "scd2_columns": {
+        "effective_start_date": "effective_start_date",
+        "effective_end_date": "effective_end_date",
+        "is_current": "is_current"
+      },
+      "track_columns": ["product_name", "category", "price", "supplier_id"],
+      "transformation_sql_path": "conf/sql/products_transform.sql",
+      "enabled": true,
+      "description": "Products table with composite key and SCD Type 2"
+    }
+  ],
+  "global_settings": {
+    "catalog": "main",
+    "schema_bronze": "bronze",
+    "schema_silver": "silver",
+    "default_watermark_column": "ingestion_ts",
+    "batch_timestamp_format": "yyyy-MM-dd HH:mm:ss.SSS",
+    "scd2_end_date_value": "9999-12-31 23:59:59",
+    "log_level": "INFO"
+  }
+}
