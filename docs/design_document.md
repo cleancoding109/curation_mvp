@@ -1033,7 +1033,289 @@ resources:
 | Package Management | UV (Python) |
 | Testing | pytest + Databricks Connect |
 
-## 10. Key Design Decisions
+## 10. Code Hierarchy (Modular Architecture)
+
+The framework follows a **layered modular architecture** with clear separation of concerns. Each module has a single responsibility and well-defined interfaces.
+
+### 10.1 Package Structure
+
+```
+src/curation_framework/
+├── __init__.py                    # Package exports & public API
+├── main.py                        # Entry point (CLI & Job execution)
+│
+├── core/                          # Core Processing Modules
+│   ├── __init__.py
+│   ├── processor.py               # Abstract base processor
+│   ├── scd1_processor.py          # SCD Type 1 merge logic
+│   ├── scd2_processor.py          # SCD Type 2 hash-based merge
+│   └── dedup.py                   # Entity-level deduplication
+│
+├── io/                            # Input/Output Modules
+│   ├── __init__.py
+│   ├── reader.py                  # Incremental source reader
+│   ├── writer.py                  # Delta table writer
+│   └── control_table.py           # Watermark control table manager
+│
+├── transform/                     # Transformation Modules
+│   ├── __init__.py
+│   ├── sql_engine.py              # SQL file executor with variable substitution
+│   ├── hash_generator.py          # SHA-256 _pk_hash & _diff_hash
+│   └── reference_loader.py        # Reference table registration
+│
+├── orchestration/                 # Orchestration Modules
+│   ├── __init__.py
+│   ├── orchestrator.py            # Batch orchestration logic
+│   ├── dependency_resolver.py     # Sub-domain ordering
+│   └── parallel_executor.py       # Parallel table processing
+│
+├── config/                        # Configuration Modules
+│   ├── __init__.py
+│   ├── loader.py                  # JSON config loading
+│   ├── validator.py               # Schema validation
+│   └── schema.py                  # Pydantic/dataclass schemas
+│
+├── observability/                 # Monitoring & Logging Modules
+│   ├── __init__.py
+│   ├── logger.py                  # Structured logging
+│   ├── metrics.py                 # Processing metrics
+│   └── audit.py                   # Audit log writer
+│
+└── utils/                         # Shared Utilities
+    ├── __init__.py
+    ├── spark_utils.py             # SparkSession helpers
+    ├── delta_utils.py             # Delta Lake operations
+    └── datetime_utils.py          # Timezone & timestamp helpers
+```
+
+### 10.2 Module Responsibilities
+
+#### 10.2.1 Core Layer (`core/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `processor.py` | Abstract `BaseProcessor` class defining the processing contract |
+| `scd1_processor.py` | Implements SCD Type 1 MERGE (upsert) pattern |
+| `scd2_processor.py` | Implements Hash-Based SCD Type 2 with `_pk_hash` and `_diff_hash` |
+| `dedup.py` | Entity-level deduplication on `(business_key, source_system)` |
+
+**Key Design**: Processors are stateless and receive all dependencies via constructor injection.
+
+```python
+# core/processor.py
+from abc import ABC, abstractmethod
+from pyspark.sql import DataFrame
+
+class BaseProcessor(ABC):
+    """Abstract base class for SCD processors."""
+    
+    @abstractmethod
+    def process(self, source_df: DataFrame, target_table: str) -> ProcessingResult:
+        """Process source DataFrame and merge into target table."""
+        pass
+```
+
+#### 10.2.2 I/O Layer (`io/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `reader.py` | Reads from Bronze with watermark filter + lookback window |
+| `writer.py` | Writes to Silver Delta tables with optimized settings |
+| `control_table.py` | Manages `curation_control.watermarks` table atomically |
+
+**Key Design**: I/O operations are isolated for testability and potential source abstraction.
+
+```python
+# io/reader.py
+class IncrementalReader:
+    """Reads source data with watermark filtering."""
+    
+    def read(self, table: str, watermark: datetime, lookback: timedelta) -> DataFrame:
+        """Read records where timestamp > (watermark - lookback)."""
+        pass
+```
+
+#### 10.2.3 Transform Layer (`transform/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `sql_engine.py` | Loads SQL files, substitutes `${variables}`, executes against temp views |
+| `hash_generator.py` | Generates `_pk_hash` and `_diff_hash` columns using SHA-256 |
+| `reference_loader.py` | Registers reference tables as temp views with optional filtering |
+
+**Key Design**: Transformations are pure SQL - no Python UDFs.
+
+```python
+# transform/sql_engine.py
+class SQLEngine:
+    """Executes parameterized SQL transformations."""
+    
+    def execute(self, sql_path: str, variables: dict, source_view: str) -> DataFrame:
+        """Load SQL, substitute variables, execute and return result."""
+        pass
+```
+
+#### 10.2.4 Orchestration Layer (`orchestration/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `orchestrator.py` | Main `BatchOrchestrator` class coordinating all processing |
+| `dependency_resolver.py` | Resolves table processing order based on `depends_on` config |
+| `parallel_executor.py` | Executes independent tables in parallel using ThreadPoolExecutor |
+
+**Key Design**: Orchestrator is the only module with knowledge of the full pipeline.
+
+```python
+# orchestration/orchestrator.py
+class BatchOrchestrator:
+    """Coordinates batch processing for all configured tables."""
+    
+    def __init__(self, spark: SparkSession, config_path: str):
+        self.reader = IncrementalReader(spark)
+        self.sql_engine = SQLEngine(spark)
+        self.control_table = ControlTableManager(spark)
+        # ... inject other dependencies
+    
+    def run(self, table_filter: list[str] = None) -> list[ProcessingResult]:
+        """Process all tables in dependency order."""
+        pass
+```
+
+#### 10.2.5 Config Layer (`config/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `loader.py` | Loads `tables_config.json` from workspace or local filesystem |
+| `validator.py` | Validates config against schema, checks required fields |
+| `schema.py` | Defines `TableConfig`, `GlobalSettings` dataclasses/Pydantic models |
+
+**Key Design**: Configuration is validated at load time, failing fast on invalid config.
+
+```python
+# config/schema.py
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class TableConfig:
+    table_name: str
+    source_table: str
+    target_table: str
+    scd_type: int
+    business_key_columns: list[str]
+    watermark_column: str = "ingestion_ts"
+    critical: bool = False
+    enabled: bool = True
+```
+
+#### 10.2.6 Observability Layer (`observability/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `logger.py` | Structured logging with JSON format for log analytics |
+| `metrics.py` | Collects processing metrics (records, duration, watermarks) |
+| `audit.py` | Writes to `curation_control.audit_log` table |
+
+**Key Design**: Observability is cross-cutting but injected, not hard-coded.
+
+```python
+# observability/audit.py
+class AuditLogger:
+    """Writes processing results to audit log table."""
+    
+    def log_run(self, run_id: str, table_name: str, result: ProcessingResult):
+        """Insert audit record for processing run."""
+        pass
+```
+
+#### 10.2.7 Utils Layer (`utils/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `spark_utils.py` | SparkSession creation, dbutils access |
+| `delta_utils.py` | OPTIMIZE, VACUUM, table existence checks |
+| `datetime_utils.py` | Timezone conversion, timestamp parsing |
+
+### 10.3 Module Dependency Graph
+
+```
+                    ┌─────────────────┐
+                    │     main.py     │
+                    │  (Entry Point)  │
+                    └────────┬────────┘
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │  orchestration/ │
+                    │   orchestrator  │
+                    └────────┬────────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         │                   │                   │
+         ▼                   ▼                   ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│     config/     │ │       io/       │ │   transform/    │
+│  loader, schema │ │ reader, writer  │ │   sql_engine    │
+└────────┬────────┘ └────────┬────────┘ └────────┬────────┘
+         │                   │                   │
+         │                   ▼                   │
+         │          ┌─────────────────┐          │
+         │          │      core/      │◀─────────┘
+         │          │ scd1, scd2, dedup│
+         │          └────────┬────────┘
+         │                   │
+         ▼                   ▼
+┌─────────────────────────────────────────────────────────┐
+│                      utils/                             │
+│     spark_utils, delta_utils, datetime_utils            │
+└─────────────────────────────────────────────────────────┘
+         │                   │
+         ▼                   ▼
+┌─────────────────────────────────────────────────────────┐
+│                   observability/                        │
+│           logger, metrics, audit                        │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Dependency Rules:**
+1. **Downward Only**: Higher layers depend on lower layers, never the reverse.
+2. **No Circular**: Modules within the same layer do not depend on each other.
+3. **Utils at Bottom**: `utils/` and `observability/` are foundational, used everywhere.
+4. **Config Isolated**: `config/` only loads data, has no processing logic.
+
+### 10.4 Key Interfaces
+
+```python
+# Public API exported from __init__.py
+from curation_framework.orchestration import BatchOrchestrator
+from curation_framework.core import SCD1Processor, SCD2Processor
+from curation_framework.config import TableConfig, load_config
+from curation_framework.io import IncrementalReader, ControlTableManager
+
+__all__ = [
+    "BatchOrchestrator",
+    "SCD1Processor", 
+    "SCD2Processor",
+    "TableConfig",
+    "load_config",
+    "IncrementalReader",
+    "ControlTableManager",
+]
+```
+
+### 10.5 Testing Strategy per Module
+
+| Layer | Test Type | Mock Dependencies |
+|-------|-----------|-------------------|
+| `core/` | Unit tests | Mock DataFrame, DeltaTable |
+| `io/` | Integration tests | Spark local, temp Delta tables |
+| `transform/` | Unit tests | Mock SQL files, temp views |
+| `orchestration/` | Integration tests | Mock all processors |
+| `config/` | Unit tests | Test JSON files |
+| `observability/` | Unit tests | Mock Spark writes |
+| `utils/` | Unit tests | Minimal mocking |
+
+## 11. Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|

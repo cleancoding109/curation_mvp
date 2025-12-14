@@ -105,7 +105,23 @@
 | 8.4 | Update DAB config to deploy SQL/JSON as Workspace Files | ⏳ Pending |
 | 8.5 | Implement Hash-Based SCD2 (Entity Hash & Diff Hash generation) | ⏳ Pending |
 
-## 3. File Structure
+### Phase 9: Modular Refactoring (New)
+
+| Task | Description | Status |
+|------|-------------|--------|
+| 9.1 | Create `core/` package with `processor.py`, `scd1_processor.py`, `scd2_processor.py`, `dedup.py` | ⏳ Pending |
+| 9.2 | Create `io/` package with `reader.py`, `writer.py`, `control_table.py` | ⏳ Pending |
+| 9.3 | Create `transform/` package with `sql_engine.py`, `hash_generator.py`, `reference_loader.py` | ⏳ Pending |
+| 9.4 | Create `orchestration/` package with `orchestrator.py`, `dependency_resolver.py`, `parallel_executor.py` | ⏳ Pending |
+| 9.5 | Create `config/` package with `loader.py`, `validator.py`, `schema.py` | ⏳ Pending |
+| 9.6 | Create `observability/` package with `logger.py`, `metrics.py`, `audit.py` | ⏳ Pending |
+| 9.7 | Create `utils/` package with `spark_utils.py`, `delta_utils.py`, `datetime_utils.py` | ⏳ Pending |
+| 9.8 | Migrate existing `silver_processor.py` logic to new modular structure | ⏳ Pending |
+| 9.9 | Update `main.py` to use new orchestration module | ⏳ Pending |
+| 9.10 | Update `__init__.py` with public API exports | ⏳ Pending |
+| 9.11 | Create tests mirroring new package structure | ⏳ Pending |
+
+## 3. File Structure (Modular Architecture)
 
 ```
 curation_framework/
@@ -134,59 +150,145 @@ curation_framework/
 │
 ├── src/                              # Source code
 │   ├── notebook.ipynb                # Interactive notebook
-│   └── curation_framework/           # Python package
-│       ├── __init__.py               # Package exports
-│       ├── main.py                   # Entry point
-│       ├── silver_processor.py       # Core processing logic
-│       └── utils.py                  # Utility functions
+│   └── curation_framework/           # Python package (Modular)
+│       ├── __init__.py               # Package exports & public API
+│       ├── main.py                   # Entry point (CLI & Job execution)
+│       │
+│       ├── core/                     # Core Processing Modules
+│       │   ├── __init__.py
+│       │   ├── processor.py          # Abstract base processor
+│       │   ├── scd1_processor.py     # SCD Type 1 merge logic
+│       │   ├── scd2_processor.py     # SCD Type 2 hash-based merge
+│       │   └── dedup.py              # Entity-level deduplication
+│       │
+│       ├── io/                       # Input/Output Modules
+│       │   ├── __init__.py
+│       │   ├── reader.py             # Incremental source reader
+│       │   ├── writer.py             # Delta table writer
+│       │   └── control_table.py      # Watermark control table manager
+│       │
+│       ├── transform/                # Transformation Modules
+│       │   ├── __init__.py
+│       │   ├── sql_engine.py         # SQL file executor
+│       │   ├── hash_generator.py     # SHA-256 hash columns
+│       │   └── reference_loader.py   # Reference table registration
+│       │
+│       ├── orchestration/            # Orchestration Modules
+│       │   ├── __init__.py
+│       │   ├── orchestrator.py       # Batch orchestration logic
+│       │   ├── dependency_resolver.py# Sub-domain ordering
+│       │   └── parallel_executor.py  # Parallel table processing
+│       │
+│       ├── config/                   # Configuration Modules
+│       │   ├── __init__.py
+│       │   ├── loader.py             # JSON config loading
+│       │   ├── validator.py          # Schema validation
+│       │   └── schema.py             # Dataclass schemas
+│       │
+│       ├── observability/            # Monitoring & Logging
+│       │   ├── __init__.py
+│       │   ├── logger.py             # Structured logging
+│       │   ├── metrics.py            # Processing metrics
+│       │   └── audit.py              # Audit log writer
+│       │
+│       └── utils/                    # Shared Utilities
+│           ├── __init__.py
+│           ├── spark_utils.py        # SparkSession helpers
+│           ├── delta_utils.py        # Delta Lake operations
+│           └── datetime_utils.py     # Timezone helpers
 │
-└── tests/                            # Test files
-    ├── conftest.py                   # pytest configuration
-    └── main_test.py                  # Unit tests
+└── tests/                            # Test files (mirror src structure)
+    ├── conftest.py                   # pytest configuration & fixtures
+    ├── core/
+    │   ├── test_scd1_processor.py
+    │   ├── test_scd2_processor.py
+    │   └── test_dedup.py
+    ├── io/
+    │   ├── test_reader.py
+    │   └── test_control_table.py
+    ├── transform/
+    │   ├── test_sql_engine.py
+    │   └── test_hash_generator.py
+    ├── orchestration/
+    │   └── test_orchestrator.py
+    ├── config/
+    │   └── test_validator.py
+    └── integration/
+        └── test_end_to_end.py
 ```
 
-## 4. Key Components
+## 4. Key Components (Modular Architecture)
 
-### 4.1 SilverProcessor Class
+### 4.1 Core Layer (`core/`)
 
-**Location:** `src/curation_framework/silver_processor.py`
+**Purpose:** Contains the core processing logic for SCD patterns.
 
-**Methods:**
-| Method | Description |
-|--------|-------------|
-| `__init__()` | Initialize with config and settings |
-| `get_high_watermark()` | Query MAX timestamp from target |
-| `read_incremental_source()` | Read source with watermark filter |
-| `apply_transformation()` | Execute SQL transformation |
-| `process_scd_type1()` | MERGE upsert pattern |
-| `process_scd_type2()` | History tracking pattern |
-| `process()` | Main orchestration method |
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `processor.py` | `BaseProcessor` | Abstract base class defining processing contract |
+| `scd1_processor.py` | `SCD1Processor` | Implements MERGE upsert pattern |
+| `scd2_processor.py` | `SCD2Processor` | Hash-based history tracking with `_pk_hash`, `_diff_hash` |
+| `dedup.py` | `deduplicate_entity()` | Entity-level dedup on `(business_key, source_system)` |
 
-### 4.2 BatchFrameworkOrchestrator Class
+### 4.2 I/O Layer (`io/`)
 
-**Location:** `src/curation_framework/silver_processor.py`
+**Purpose:** Handles all data input/output operations.
 
-**Methods:**
-| Method | Description |
-|--------|-------------|
-| `__init__()` | Load configuration |
-| `process_table()` | Process single table |
-| `process_all_tables()` | Process all enabled tables |
-| `get_processing_summary()` | Generate execution report |
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `reader.py` | `IncrementalReader` | Reads Bronze with watermark filter + lookback |
+| `writer.py` | `DeltaWriter` | Writes to Silver Delta tables |
+| `control_table.py` | `ControlTableManager` | Atomic watermark updates to control table |
 
-### 4.3 Utility Functions
+### 4.3 Transform Layer (`transform/`)
 
-**Location:** `src/curation_framework/utils.py`
+**Purpose:** Handles all data transformation logic.
 
-| Function | Description |
-|----------|-------------|
-| `validate_table_config()` | Validate config structure |
-| `table_exists()` | Check if Delta table exists |
-| `create_hash_column()` | Generate row hash for change detection |
-| `deduplicate_by_key()` | Remove duplicates keeping latest |
-| `generate_scd2_columns()` | Add SCD2 metadata columns |
-| `optimize_delta_table()` | Run OPTIMIZE command |
-| `vacuum_delta_table()` | Run VACUUM command |
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `sql_engine.py` | `SQLEngine` | Loads SQL, substitutes variables, executes |
+| `hash_generator.py` | `generate_pk_hash()`, `generate_diff_hash()` | SHA-256 hash column generation |
+| `reference_loader.py` | `ReferenceLoader` | Registers reference tables as temp views |
+
+### 4.4 Orchestration Layer (`orchestration/`)
+
+**Purpose:** Coordinates the end-to-end batch processing.
+
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `orchestrator.py` | `BatchOrchestrator` | Main class coordinating all processing |
+| `dependency_resolver.py` | `resolve_order()` | Topological sort based on `depends_on` |
+| `parallel_executor.py` | `ParallelExecutor` | ThreadPoolExecutor for independent tables |
+
+### 4.5 Config Layer (`config/`)
+
+**Purpose:** Configuration loading and validation.
+
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `loader.py` | `load_config()` | Load JSON from workspace or local |
+| `validator.py` | `validate_config()` | Validate against schema, fail fast |
+| `schema.py` | `TableConfig`, `GlobalSettings` | Dataclass definitions |
+
+### 4.6 Observability Layer (`observability/`)
+
+**Purpose:** Logging, metrics, and audit trail.
+
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `logger.py` | `get_logger()` | Structured JSON logging |
+| `metrics.py` | `MetricsCollector` | Processing metrics (counts, duration) |
+| `audit.py` | `AuditLogger` | Writes to `curation_control.audit_log` |
+
+### 4.7 Utils Layer (`utils/`)
+
+**Purpose:** Shared utility functions.
+
+| Module | Function | Description |
+|--------|----------|-------------|
+| `spark_utils.py` | `get_spark()`, `get_dbutils()` | SparkSession and dbutils access |
+| `delta_utils.py` | `table_exists()`, `optimize_table()`, `vacuum_table()` | Delta Lake operations |
+| `datetime_utils.py` | `convert_timezone()`, `parse_timestamp()` | Timezone and timestamp helpers |
 
 ## 5. Configuration Reference
 
