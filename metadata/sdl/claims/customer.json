@@ -1,0 +1,69 @@
+{
+  "table_name": "customer",
+  "description": "Standardized Customer Data",
+  "source": {
+    "schema": "unified_dev",
+    "table": "unified_customer_scd2"
+  },
+  "target": {
+    "schema": "standardized_data_layer",
+    "table": "customer"
+  },
+  "load_strategy": {
+    "type": "scd2",
+    "business_keys": ["customer_id"],
+    "scd2_mode": {
+      "historical": "passthrough",
+      "incremental": "framework_managed"
+    },
+    "scd2_columns": {
+      "effective_start_date": "effective_start_date",
+      "effective_end_date": "effective_end_date",
+      "is_current": "is_current"
+    }
+  },
+  "hash_keys": {
+    "_pk_hash": {
+      "description": "Entity Hash (Merge Key)",
+      "algorithm": "SHA2-256",
+      "columns": ["customer_id", "source_system"]
+    },
+    "_diff_hash": {
+      "description": "Change Hash (SCD2 Change Detection)",
+      "algorithm": "SHA2-256",
+      "track_columns": ["customer_name", "date_of_birth", "email", "phone", "state", "zip_code", "status", "last_login", "session_count", "page_views"]
+    }
+  },
+  "source_system_column": "source_system",
+  "reference_joins": [
+    {
+      "table": "state_lookup",
+      "schema": "standardized_data_layer",
+      "alias": "st",
+      "join_type": "LEFT",
+      "join_condition": "src.state = st.state_code"
+    }
+  ],
+  "columns": [
+    { "source_col": "customer_id", "target_col": "customer_id", "type": "string" },
+    { "source_col": "customer_name", "target_col": "full_name", "type": "string" },
+    { "source_col": "date_of_birth", "target_col": "date_of_birth", "type": "date" },
+    { "source_col": "email", "target_col": "email", "type": "string" },
+    { "source_col": "phone", "target_col": "phone_number", "type": "string" },
+    { "source_col": "state", "target_col": "state_code", "type": "string" },
+    { "source_col": "st.state_name", "target_col": "state_name", "type": "string", "from_reference": true },
+    { "source_col": "st.region", "target_col": "region", "type": "string", "from_reference": true },
+    { "source_col": "zip_code", "target_col": "postal_code", "type": "string" },
+    { "source_col": "status", "target_col": "customer_status", "type": "string" },
+    { 
+      "source_col": "last_login", 
+      "target_col": "last_login_at_utc", 
+      "type": "timestamp",
+      "transform": "to_utc",
+      "source_timezone": "America/New_York"
+    },
+    { "source_col": "session_count", "target_col": "session_count", "type": "integer" },
+    { "source_col": "page_views", "target_col": "page_views", "type": "integer" },
+    { "source_col": "source_system", "target_col": "source_system", "type": "string" }
+  ]
+}

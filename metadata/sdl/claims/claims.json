@@ -1,0 +1,70 @@
+{
+  "table_name": "claims",
+  "description": "Standardized Claims Data",
+  "source": {
+    "schema": "unified_dev",
+    "table": "unified_claims_scd2"
+  },
+  "target": {
+    "schema": "standardized_data_layer",
+    "table": "claims"
+  },
+  "load_strategy": {
+    "type": "scd2",
+    "business_keys": ["claim_id"],
+    "scd2_mode": {
+      "historical": "passthrough",
+      "incremental": "framework_managed"
+    },
+    "scd2_columns": {
+      "effective_start_date": "effective_start_date",
+      "effective_end_date": "effective_end_date",
+      "is_current": "is_current"
+    }
+  },
+  "hash_keys": {
+    "_pk_hash": {
+      "description": "Entity Hash (Merge Key)",
+      "algorithm": "SHA2-256",
+      "columns": ["claim_id", "source_system"]
+    },
+    "_diff_hash": {
+      "description": "Change Hash (SCD2 Change Detection)",
+      "algorithm": "SHA2-256",
+      "track_columns": ["claimant_id", "policy_number", "claim_type", "step_name", "step_status", "adjuster_id", "claim_decision", "denial_reason", "claim_amount", "approved_amount", "event_timestamp"]
+    }
+  },
+  "source_system_column": "source_system",
+  "reference_joins": [
+    {
+      "table": "adjuster_lookup",
+      "schema": "standardized_data_layer",
+      "alias": "adj",
+      "join_type": "LEFT",
+      "join_condition": "src.adjuster_id = adj.adjuster_id"
+    }
+  ],
+  "columns": [
+    { "source_col": "claim_id", "target_col": "claim_id", "type": "string" },
+    { "source_col": "claimant_id", "target_col": "customer_id", "type": "string" },
+    { "source_col": "policy_number", "target_col": "policy_number", "type": "string" },
+    { "source_col": "claim_type", "target_col": "claim_type", "type": "string" },
+    { "source_col": "step_name", "target_col": "workflow_step", "type": "string" },
+    { "source_col": "step_status", "target_col": "workflow_status", "type": "string" },
+    { "source_col": "adjuster_id", "target_col": "adjuster_id", "type": "string" },
+    { "source_col": "adj.adjuster_name", "target_col": "adjuster_name", "type": "string", "from_reference": true },
+    { "source_col": "adj.adjuster_region", "target_col": "adjuster_region", "type": "string", "from_reference": true },
+    { "source_col": "claim_decision", "target_col": "decision", "type": "string" },
+    { "source_col": "denial_reason", "target_col": "denial_reason", "type": "string" },
+    { "source_col": "claim_amount", "target_col": "requested_amount", "type": "decimal(10,2)" },
+    { "source_col": "approved_amount", "target_col": "approved_amount", "type": "decimal(10,2)" },
+    { 
+      "source_col": "event_timestamp", 
+      "target_col": "event_at_utc", 
+      "type": "timestamp",
+      "transform": "to_utc",
+      "source_timezone": "America/New_York"
+    },
+    { "source_col": "source_system", "target_col": "source_system", "type": "string" }
+  ]
+}
