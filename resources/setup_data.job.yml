@@ -12,9 +12,9 @@ resources:
           
           environment_key: default
 
-      # environments:
-      #   - environment_key: default
-      #     spec:
-      #       client: "1"
-      #       dependencies:
-      #         - delta-spark>=3.0.0
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+            dependencies:
+              - delta-spark>=3.0.0
