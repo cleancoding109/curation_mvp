@@ -10,6 +10,13 @@ This document describes the architecture and design of a metadata-driven Spark B
 - Implementing SCD (Slowly Changing Dimension) patterns
 - Producing curated, query-ready Silver tables
 
+**Silver Layer = Relational Model (ODS Pattern)**
+- Follows a normalized/relational data model similar to an Operational Data Store (ODS)
+- Entity-centric tables (Customers, Orders, Products, etc.)
+- Maintains referential integrity between entities
+- Serves as the "single source of truth" for cleansed, conformed data
+- Optimized for operational reporting and downstream Gold layer aggregations
+
 ## 2. Architecture
 
 ### 2.1 High-Level Architecture
@@ -36,13 +43,17 @@ This document describes the architecture and design of a metadata-driven Spark B
 │                                                              │               │
 │                                                              ▼               │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                    SILVER LAYER (Curated Delta Tables)                │  │
+│  │           SILVER LAYER = RELATIONAL MODEL (ODS Pattern)               │  │
+│  │                    Curated, Normalized Delta Tables                   │  │
 │  │  ┌─────────────────────────────┐  ┌─────────────────────────────────┐ │  │
 │  │  │  SCD Type 1 Tables          │  │  SCD Type 2 Tables              │ │  │
 │  │  │  - Current state only       │  │  - Full history tracking        │ │  │
 │  │  │  - Upsert pattern           │  │  - Effective dates              │ │  │
 │  │  │  - Fast lookups             │  │  - Point-in-time queries        │ │  │
 │  │  └─────────────────────────────┘  └─────────────────────────────────┘ │  │
+│  │                                                                        │  │
+│  │  Entity Tables: Customers, Orders, Products, Suppliers, etc.          │  │
+│  │  Referential Integrity: Foreign key relationships maintained          │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                              │               │
 │                                                              ▼               │
