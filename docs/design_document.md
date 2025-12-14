@@ -310,7 +310,7 @@ Two internal hash columns are generated to simplify logic:
     - **Benefit**: Avoids expensive column-by-column comparisons; handles nulls consistently.
     - **Algorithm**: SHA-256 chosen over MD5 for collision resistance in regulated domains.
 
-#### 3.3.4 Hash Canonicalization Rules
+#### 3.3.2 Hash Canonicalization Rules
 
 To ensure deterministic hashing across runs and Spark versions:
 
@@ -322,7 +322,7 @@ To ensure deterministic hashing across runs and Spark versions:
 | `DECIMAL` | Cast to `STRING` with fixed scale (e.g., `CAST(col AS DECIMAL(18,6))`) |
 | `BOOLEAN` | Cast to `STRING` (`"true"` / `"false"`) |
 
-#### 3.3.2 Required Parameters
+#### 3.3.3 Required Parameters
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
@@ -331,7 +331,7 @@ To ensure deterministic hashing across runs and Spark versions:
 | `scd2_columns` | Metadata columns for versioning. | `{"start": "eff_start", "end": "eff_end", "curr": "is_current"}` |
 | `source_system_col` | Column identifying data origin. | `"source_system"` |
 
-#### 3.3.3 Logic Flow Diagram
+#### 3.3.4 Logic Flow Diagram
 
 **Pre-Merge Steps (Mandatory):**
 1. **Batch Reduction**: Deduplicate incoming data to one row per `(business_key, source_system)` using configured ordering.
@@ -458,11 +458,11 @@ To ensure deterministic hashing across runs and Spark versions:
 
 ## 5. Configuration Schema
 
-### 5.0 Parameterized SQL Transformations
+### 5.1 Parameterized SQL Transformations
 
 All transformations are implemented in **pure Spark SQL** (no Python UDFs). Parameters are injected into SQL at runtime using variable substitution.
 
-#### 5.0.1 Timezone Conversion
+#### 5.1.1 Timezone Conversion
 
 Source data may arrive in UTC or source-system-local time. The framework supports parameterized timezone conversion.
 
@@ -493,12 +493,12 @@ FROM source_incremental
 
 **Supported Functions (Native Spark SQL):**
 | Function | Purpose |
-|----------|---------||
+|----------|---------|
 | `TO_UTC_TIMESTAMP(ts, tz)` | Convert local time to UTC |
 | `FROM_UTC_TIMESTAMP(ts, tz)` | Convert UTC to local time |
 | `CONVERT_TIMEZONE(from_tz, to_tz, ts)` | Direct conversion (Databricks SQL) |
 
-#### 5.0.2 Reference Data Lookups
+#### 5.1.2 Reference Data Lookups
 
 Enrich source data by joining to reference/dimension tables. Reference tables are registered as temp views before transformation SQL executes.
 
@@ -543,20 +543,20 @@ LEFT JOIN ref_icd_codes icd
 - **Current Records Only**: Dimension tables filtered to `is_current = true` for SCD2 dimensions.
 - **Broadcast Hint**: Small reference tables can use `/*+ BROADCAST(ref_providers) */` for performance.
 
-#### 5.0.3 SQL Variable Substitution
+#### 5.1.3 SQL Variable Substitution
 
 The framework replaces `${variable_name}` placeholders in SQL files with values from configuration at runtime.
 
 **Available Variables:**
 | Variable | Source | Example |
-|----------|--------|---------||
+|----------|--------|---------|
 | `${source_timezone}` | Table config | `"UTC"` |
 | `${target_timezone}` | Table config | `"America/New_York"` |
 | `${catalog}` | Global settings | `"main"` |
 | `${schema_silver}` | Global settings | `"silver"` |
 | `${processing_date}` | Runtime | `"2024-01-15"` |
 
-#### 5.0.4 Complete Transformation Example
+#### 5.1.4 Complete Transformation Example
 
 This section demonstrates a complete end-to-end transformation for the `Claims` entity.
 
@@ -673,7 +673,14 @@ LEFT JOIN /*+ BROADCAST(ref_claim_status) */ ref_claim_status cs
   ON TRIM(UPPER(s.claim_status)) = cs.status_code
 ```
 
-**Key Contract Enforcement:**\n- ✅ SQL reads from `source_deduped` (not `source_incremental`)\n- ✅ SQL outputs `_pk_hash` (required for all tables)\n- ✅ SQL outputs `_diff_hash` (required for SCD2)\n- ✅ SQL does NOT implement dedup logic (no ROW_NUMBER partition by keys)\n- ✅ Reference tables accessed via framework-registered views\n\n**Framework Post-Processing (After SQL Execution):**
+**Key Contract Enforcement:**
+- ✅ SQL reads from `source_deduped` (not `source_incremental`)
+- ✅ SQL outputs `_pk_hash` (required for all tables)
+- ✅ SQL outputs `_diff_hash` (required for SCD2)
+- ✅ SQL does NOT implement dedup logic (no ROW_NUMBER partition by keys)
+- ✅ Reference tables accessed via framework-registered views
+
+**Framework Post-Processing (After SQL Execution):**
 
 The framework takes the output of the transformation SQL and applies SCD2 logic:
 
@@ -733,7 +740,7 @@ WHERE _action IN ('INSERT', 'UPDATE');
 | Watermark Update | Framework | `reader/control_table.py` |
 | Audit Logging | Framework | `audit/audit_logger.py` |
 
-### 5.0.5 Validation Rules
+### 5.2 Validation Rules
 
 The framework enforces these rules at startup and runtime to prevent configuration drift and ensure contract compliance.
 
@@ -813,7 +820,7 @@ def validate_sql_output(df: DataFrame, config: TableConfig) -> list[ValidationEr
     return errors
 ```
 
-### 5.1 Table Configuration
+### 5.3 Table Configuration
 
 ```json
 {
@@ -854,7 +861,7 @@ def validate_sql_output(df: DataFrame, config: TableConfig) -> list[ValidationEr
 }
 ```
 
-### 5.2 Global Settings
+### 5.4 Global Settings
 
 ```json
 {
@@ -874,7 +881,7 @@ def validate_sql_output(df: DataFrame, config: TableConfig) -> list[ValidationEr
 }
 ```
 
-### 5.3 Control Table Schema
+### 5.5 Control Table Schema
 
 ```sql
 CREATE TABLE IF NOT EXISTS silver.curation_control (
@@ -893,7 +900,7 @@ CREATE TABLE IF NOT EXISTS silver.curation_control (
 - Application-level guarantee: Use `MERGE INTO control_table` keyed by `table_name` to ensure upsert semantics.
 - Periodic validation: Schedule a check for duplicate `table_name` entries.
 
-### 5.4 Audit Log Table Schema
+### 5.6 Audit Log Table Schema
 
 ```sql
 CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
