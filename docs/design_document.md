@@ -27,6 +27,31 @@ Long-Term Care (LTC) insurance covers services for individuals who need extended
 - Serves as the "single source of truth" for cleansed, conformed claims data
 - Optimized for operational reporting and downstream Gold layer aggregations
 
+### 1.2 Upstream Integration: Unified Bronze Layer
+
+The Curation Framework consumes data from a **Unified Bronze Layer** which acts as the raw ingestion point for all source systems.
+
+- **Source Architecture**: The Bronze layer uses a **Unified SCD Type 2** pattern.
+- **Composite Key**: Records are uniquely identified by `entity_id` + `source_system`.
+- **Duplicate Preservation**: The Bronze layer intentionally preserves duplicates from different source systems (e.g., the same Claimant from "AdminSystem" and "CRM").
+- **Role of Silver**: The Silver layer is responsible for **Entity Resolution**—collapsing these multi-source Bronze records into a single "Golden Record" for the Silver ODS.
+
+### 1.3 Entity Resolution Strategy
+
+To handle the multi-source nature of the Bronze layer, the Silver layer implements a robust Entity Resolution strategy:
+
+1.  **Priority-Based Selection**:
+    - When multiple sources provide data for the same entity (e.g., Claimant), a configured **priority list** determines the winner.
+    - *Example*: `[AdminSystem, CRM, Sales]`. If `AdminSystem` has data, it wins. If not, `CRM` is used.
+    - This logic is implemented in the SQL Transformation step before the Silver SCD merge.
+
+2.  **Union & Aggregation**:
+    - For transactional entities (like Claims or Payments) that are distinct across systems, records are **unioned**.
+    - A `source_system` column is maintained in Silver to track lineage.
+
+3.  **Business Key Management**:
+    - The Silver layer generates its own surrogate keys (e.g., `claimant_sk`) or uses a standardized Business Key that abstracts away the source-specific IDs.
+
 ## 2. Architecture
 
 ### 2.1 High-Level Architecture

@@ -86,6 +86,15 @@
 | 6.4 | Deploy to prod environment | ⏳ Pending |
 | 6.5 | Enable scheduling | ⏳ Pending |
 
+### Phase 7: Entity Resolution & Upstream Integration (New)
+
+| Task | Description | Status |
+|------|-------------|--------|
+| 7.1 | Update SQL transforms for Priority Logic (Rank/Window functions) | ⏳ Pending |
+| 7.2 | Implement `source_system` column handling in Silver schemas | ⏳ Pending |
+| 7.3 | Create unit tests for multi-source merge scenarios | ⏳ Pending |
+| 7.4 | Validate deduplication logic against Bronze sample data | ⏳ Pending |
+
 ## 3. File Structure
 
 ```
