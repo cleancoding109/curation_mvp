@@ -171,9 +171,10 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 - **Idempotency Guarantee**: Because of the lookback + dedup, reprocessing is always safe and produces the same result.
 
 **Deduplication Specification:**
-- **Dedup Key**: `(business_key_columns, source_system, ingestion_ts)`
+- **Dedup Key**: `(business_key_columns, source_system)` — One row per entity per batch.
 - **Ordering**: `ORDER BY ingestion_ts DESC, _kafka_offset DESC` (or configured tiebreaker)
 - **Rule**: Keep the **first** record per dedup key after ordering (latest by time, stable by offset).
+- **Mandatory Step**: This reduction to one row per entity **must** occur before SCD merge.
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -254,6 +255,10 @@ To ensure deterministic hashing across runs and Spark versions:
 | `source_system_col` | Column identifying data origin. | `"source_system"` |
 
 #### 3.3.3 Logic Flow Diagram
+
+**Pre-Merge Steps (Mandatory):**
+1. **Batch Reduction**: Deduplicate incoming data to one row per `(business_key, source_system)` using configured ordering.
+2. **Target Filtering (Semi-Join)**: Filter target's current rows to only keys present in incoming batch to avoid full table scan.
 
 ```
 ┌──────────────────────┐          ┌──────────────────────┐
@@ -412,9 +417,42 @@ To ensure deterministic hashing across runs and Spark versions:
   "default_lookback_interval": "2 HOURS",
   "default_dedup_order_columns": ["ingestion_ts DESC"],
   "scd2_end_date_value": "9999-12-31 23:59:59",
-  "workspace_file_path": "/Workspace/Users/${workspace.current_user.userName}/curation_framework",
+  "workspace_file_path": "${workspace.root_path}/files",
   "log_level": "INFO"
 }
+```
+
+### 5.3 Control Table Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS silver.curation_control (
+  table_name        STRING NOT NULL,
+  watermark_value   TIMESTAMP,
+  last_run_id       STRING,
+  last_run_status   STRING,
+  records_processed BIGINT,
+  updated_at        TIMESTAMP,
+  CONSTRAINT pk_control PRIMARY KEY (table_name)
+);
+```
+
+### 5.4 Audit Log Table Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
+  run_id            STRING NOT NULL,
+  table_name        STRING NOT NULL,
+  run_start_ts      TIMESTAMP,
+  run_end_ts        TIMESTAMP,
+  status            STRING,
+  records_read      BIGINT,
+  records_inserted  BIGINT,
+  records_updated   BIGINT,
+  watermark_before  TIMESTAMP,
+  watermark_after   TIMESTAMP,
+  error_message     STRING,
+  CONSTRAINT pk_audit PRIMARY KEY (run_id, table_name)
+);
 ```
 ## 6. Deployment Architecture
 
