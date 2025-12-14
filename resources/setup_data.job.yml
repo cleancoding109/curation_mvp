@@ -18,3 +18,4 @@ resources:
             client: "1"
             dependencies:
               - delta-spark>=3.0.0
+            spark_version: "15.4.x-scala2.12"
