@@ -1514,525 +1514,213 @@ Configuration files (`tables_config.json`, SQL files) are deployed as workspace 
 
 ## 10. Code Hierarchy (Modular Architecture)
 
-The framework follows a **layered modular architecture** with clear separation of concerns. Each module has a single responsibility and well-defined interfaces.
+The framework follows a **flat modular architecture** with clear separation of concerns. Each module has a single responsibility and well-defined interfaces.
 
 ### 10.1 Package Structure
 
-**Entry Point**: `curation_framework.job_executor:main()` - invoked by `python_wheel_task` in DAB jobs.
-
 ```
-src/curation_framework/
-├── __init__.py                    # Package exports & public API
-├── job_executor.py                # ⭐ Main entry point (dispatches to pipeline by type)
-│
-├── pipelines/                     # Pipeline Implementations
+src/
+├── config/                         # Configuration & Metadata
 │   ├── __init__.py
-│   ├── base_pipeline.py           # Abstract base pipeline class
-│   ├── lakeflow_curation_pipeline.py  # ⭐ Bronze-to-Silver curation pipeline
-│   └── (future: other pipeline types)
+│   ├── metadata_loader.py          # Load metadata JSON files
+│   └── environment.py              # Resolve catalog from bundle
 │
-├── core/                          # Core Processing Modules
+├── transform/                      # SQL Template Processing
 │   ├── __init__.py
-│   ├── processor.py               # Abstract base processor
-│   ├── scd1_processor.py          # SCD Type 1 merge logic
-│   ├── scd2_processor.py          # SCD Type 2 hash-based merge
-│   └── dedup.py                   # Entity-level deduplication
+│   ├── template_resolver.py        # Load SQL file + resolve {{...}} placeholders
+│   ├── hash_generator.py           # Generate hash expressions
+│   └── sql_executor.py             # Execute resolved SQL via Spark
 │
-├── reader/                        # Source Reading Modules
+├── reader/                         # Data Reading
 │   ├── __init__.py
-│   ├── incremental_reader.py      # Watermark + lookback incremental read
-│   ├── control_table.py           # Watermark control table manager
-│   └── bronze_reader.py           # Bronze-specific read utilities
+│   ├── source_reader.py            # Read from source tables with watermark
+│   └── reference_reader.py         # Load reference tables for joins
 │
-├── writer/                        # Target Writing Modules
+├── writer/                         # Data Writing
 │   ├── __init__.py
-│   ├── delta_writer.py            # Delta table write operations
-│   ├── merge_executor.py          # SCD merge execution
-│   └── table_manager.py           # Table creation, schema evolution
+│   └── delta_writer.py             # MERGE / INSERT into target Delta tables
 │
-├── audit/                         # Audit & Observability Modules
+├── state/                          # State Management
 │   ├── __init__.py
-│   ├── audit_logger.py            # Audit log table writer
-│   ├── metrics_collector.py       # Processing metrics collection
-│   └── run_tracker.py             # Run ID and status tracking
+│   └── watermark.py                # Get/update watermark from control table
 │
-├── transform/                     # Transformation Modules
+├── load_strategy/                  # Load Patterns (matches metadata)
 │   ├── __init__.py
-│   ├── sql_engine.py              # SQL file executor with variable substitution
-│   ├── hash_generator.py          # SHA-256 _pk_hash & _diff_hash
-│   └── reference_loader.py        # Reference table registration
+│   ├── base.py                     # Abstract base class
+│   ├── factory.py                  # Select strategy by type
+│   ├── scd2.py                     # SCD Type 2 (history tracking)
+│   ├── scd1.py                     # SCD Type 1 (upsert)
+│   ├── insert_only.py              # Append only
+│   ├── delete_insert.py            # Partition refresh
+│   └── truncate_insert.py          # Full table refresh
 │
-├── orchestration/                 # Orchestration Modules
+├── pipeline/                       # Pipeline Definition
 │   ├── __init__.py
-│   ├── orchestrator.py            # Batch orchestration logic
-│   ├── dependency_resolver.py     # Sub-domain ordering
-│   └── parallel_executor.py       # Parallel table processing
+│   └── lakeflow_curation_pipeline.py  # Complete pipeline orchestration
 │
-├── config/                        # Configuration Modules
+├── executor/                       # Execution & Entry Points
 │   ├── __init__.py
-│   ├── loader.py                  # JSON config loading
-│   ├── validator.py               # Schema validation
-│   └── schema.py                  # Pydantic/dataclass schemas
+│   └── job_executor.py             # Entry point for Databricks jobs
 │
-└── utils/                         # Shared Utilities
+└── utils/                          # Shared Utilities
     ├── __init__.py
-    ├── spark_utils.py             # SparkSession helpers
-    ├── delta_utils.py             # Delta Lake operations
-    └── datetime_utils.py          # Timezone & timestamp helpers
+    ├── spark_session.py            # Get/create SparkSession
+    ├── dedup.py                    # Metadata-driven deduplication
+    └── logging.py                  # Structured logging
 ```
 
-### 10.2 Entry Point Architecture
+**9 packages, 20 Python files**
 
-The framework uses a **dispatcher pattern** where `job_executor.py` routes execution to the appropriate pipeline based on `pipeline_type`.
+### 10.2 Package Responsibilities
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Entry Point Architecture                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  DAB Job Task                                                                │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  python_wheel_task:                                                  │    │
-│  │    entry_point: job_executor                                         │    │
-│  │    parameters:                                                       │    │
-│  │      - "--pipeline_type=lakeflow_curation"                           │    │
-│  │      - "--table_name=silver_claimants"                               │    │
-│  │      - "--config_path=conf/tables_config.json"                       │    │
-│  └──────────────────────────────┬──────────────────────────────────────┘    │
-│                                 │                                            │
-│                                 ▼                                            │
-│  job_executor.py                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  1. Parse CLI arguments (--pipeline_type, --table_name, etc.)       │    │
-│  │  2. Load configuration                                               │    │
-│  │  3. Dispatch to pipeline based on pipeline_type                      │    │
-│  │  4. Return exit code                                                 │    │
-│  └──────────────────────────────┬──────────────────────────────────────┘    │
-│                                 │                                            │
-│                   ┌─────────────┴─────────────┐                             │
-│                   │    pipeline_type?         │                             │
-│                   └─────────────┬─────────────┘                             │
-│                                 │                                            │
-│         ┌───────────────────────┼───────────────────────┐                   │
-│         │                       │                       │                   │
-│         ▼                       ▼                       ▼                   │
-│  ┌──────────────┐       ┌──────────────┐       ┌──────────────┐            │
-│  │ lakeflow_    │       │ (future)     │       │ (future)     │            │
-│  │ curation     │       │ gold_agg     │       │ data_quality │            │
-│  └──────┬───────┘       └──────────────┘       └──────────────┘            │
-│         │                                                                    │
-│         ▼                                                                    │
-│  lakeflow_curation_pipeline.py                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Bronze → Silver curation with:                                      │    │
-│  │  - Watermark + Lookback incremental read                            │    │
-│  │  - Metadata-driven deduplication                                     │    │
-│  │  - SQL transformation execution                                      │    │
-│  │  - SCD1/SCD2 merge                                                   │    │
-│  │  - Control table update                                              │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+| Package | Responsibility |
+|---------|----------------|
+| `config/` | Load & validate metadata JSON, resolve environment (catalog) from bundle |
+| `transform/` | Load SQL templates, resolve placeholders, generate hash expressions, execute SQL |
+| `reader/` | Read source and reference tables with proper filtering |
+| `writer/` | Delta MERGE operations, handle various write patterns |
+| `state/` | Watermark management via control table |
+| `load_strategy/` | Strategy pattern for SCD2, SCD1, insert-only, delete-insert, truncate-insert |
+| `pipeline/` | Orchestrate read → transform → process → write flow |
+| `executor/` | Entry point for Databricks jobs, handles CLI args |
+| `utils/` | Spark session, deduplication, logging utilities |
 
-#### 10.2.1 job_executor.py
-
-**Role**: Main entry point invoked by Databricks `python_wheel_task`. Parses arguments and dispatches to the appropriate pipeline.
-
-**Responsibilities:**
-- Parse CLI arguments (`--pipeline_type`, `--table_name`, `--config_path`, etc.)
-- Initialize SparkSession and logging
-- Load and validate configuration
-- Dispatch to registered pipeline based on `pipeline_type`
-- Handle top-level exceptions and return appropriate exit codes
-- Write final audit log entry
-
-**Supported Arguments:**
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--pipeline_type` | Yes | Pipeline to execute (e.g., `lakeflow_curation`) |
-| `--table_name` | Yes | Target table to process |
-| `--config_path` | No | Path to config file (default: `conf/tables_config.json`) |
-| `--run_id` | No | Unique run identifier (auto-generated if not provided) |
-
-**Pipeline Registry:**
-
-| `pipeline_type` Value | Pipeline Class | Description |
-|-----------------------|----------------|-------------|
-| `lakeflow_curation` | `LakeflowCurationPipeline` | Bronze → Silver batch curation |
-| _(future)_ `gold_aggregation` | `GoldAggregationPipeline` | Silver → Gold aggregations |
-| _(future)_ `data_quality` | `DataQualityPipeline` | Data quality checks |
-
-#### 10.2.2 pipelines/base_pipeline.py
-
-**Role**: Abstract base class defining the pipeline contract.
-
-**Interface:**
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  class BasePipeline(ABC):                                       │
-│                                                                  │
-│    @abstractmethod                                              │
-│    def run(self, table_config: TableConfig) -> PipelineResult   │
-│                                                                  │
-│    @property                                                     │
-│    @abstractmethod                                              │
-│    def pipeline_type(self) -> str                               │
-│                                                                  │
-│    def validate_config(self, config: TableConfig) -> bool       │
-│    def get_metrics(self) -> dict                                │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-#### 10.2.3 pipelines/lakeflow_curation_pipeline.py
-
-**Role**: Implements the Bronze → Silver curation pipeline. This is the primary pipeline for LTC Claims processing.
-
-**Execution Flow:**
-1. Read from Bronze with watermark + lookback
-2. Apply metadata-driven deduplication
-3. Register `source_deduped` and reference temp views
-4. Execute developer transformation SQL
-5. Validate output schema (`_pk_hash`, `_diff_hash`)
-6. Execute SCD1 or SCD2 merge
-7. Update control table watermark
-8. Write audit log
-
-**Dependencies:**
-- `core/dedup.py` - Deduplication logic
-- `core/scd1_processor.py` or `core/scd2_processor.py` - Merge logic
-- `reader/incremental_reader.py` - Incremental source reading
-- `reader/control_table.py` - Watermark management
-- `writer/merge_executor.py` - SCD merge execution
-- `audit/audit_logger.py` - Audit log writing
-- `transform/sql_engine.py` - SQL execution
-- `transform/reference_loader.py` - Reference table registration
-
-### 10.3 Module Responsibilities
-
-#### 10.3.1 Core Layer (`core/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `processor.py` | Abstract `BaseProcessor` class defining the processing contract |
-| `scd1_processor.py` | Implements SCD Type 1 MERGE (upsert) pattern |
-| `scd2_processor.py` | Implements Hash-Based SCD Type 2 with `_pk_hash` and `_diff_hash` |
-| `dedup.py` | Entity-level deduplication on `(business_key, source_system)` |
-
-**Key Design**: Processors are stateless and receive all dependencies via constructor injection.
-
-```python
-# core/processor.py
-from abc import ABC, abstractmethod
-from pyspark.sql import DataFrame
-
-class BaseProcessor(ABC):
-    """Abstract base class for SCD processors."""
-    
-    @abstractmethod
-    def process(self, source_df: DataFrame, target_table: str) -> ProcessingResult:
-        """Process source DataFrame and merge into target table."""
-        pass
-```
-
-#### 10.3.2 Reader Layer (`reader/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `incremental_reader.py` | Reads from Bronze with watermark filter + lookback window |
-| `control_table.py` | Manages `silver.curation_control` watermark table atomically |
-| `bronze_reader.py` | Bronze-specific read utilities and schema validation |
-
-**Key Design**: Reader operations are isolated for testability and source abstraction.
-
-```python
-# reader/incremental_reader.py
-class IncrementalReader:
-    """Reads source data with watermark filtering."""
-    
-    def read(self, table: str, watermark: datetime, lookback: timedelta) -> DataFrame:
-        """Read records where timestamp > (watermark - lookback)."""
-        pass
-```
-
-#### 10.3.3 Writer Layer (`writer/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `delta_writer.py` | Writes to Silver Delta tables with optimized settings |
-| `merge_executor.py` | Executes SCD MERGE operations |
-| `table_manager.py` | Table creation, schema evolution, OPTIMIZE/VACUUM |
-
-**Key Design**: Writer operations handle all Delta-specific optimizations.
-
-```python
-# writer/merge_executor.py
-class MergeExecutor:
-    """Executes SCD merge operations."""
-    
-    def execute_scd1_merge(self, source_df: DataFrame, target_table: str, keys: list) -> MergeResult:
-        """Execute SCD Type 1 upsert merge."""
-        pass
-    
-    def execute_scd2_merge(self, source_df: DataFrame, target_table: str, pk_hash: str) -> MergeResult:
-        """Execute SCD Type 2 hash-based merge."""
-        pass
-```
-
-#### 10.3.4 Audit Layer (`audit/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `audit_logger.py` | Writes processing results to `silver.curation_audit_log` |
-| `metrics_collector.py` | Collects processing metrics (records, duration, watermarks) |
-| `run_tracker.py` | Manages run IDs, status tracking, and run metadata |
-
-**Key Design**: Audit is cross-cutting but injected, not hard-coded.
-
-```python
-# audit/audit_logger.py
-class AuditLogger:
-    """Writes processing results to audit log table."""
-    
-    def log_run(self, run_id: str, table_name: str, result: ProcessingResult):
-        """Insert audit record for processing run."""
-        pass
-    
-    def log_error(self, run_id: str, table_name: str, error: Exception):
-        """Insert error audit record."""
-        pass
-```
-
-#### 10.3.5 Transform Layer (`transform/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `sql_engine.py` | Loads SQL files, substitutes `${variables}`, executes against temp views |
-| `hash_generator.py` | Generates `_pk_hash` and `_diff_hash` columns using SHA-256 |
-| `reference_loader.py` | Registers reference tables as temp views with optional filtering |
-
-**Key Design**: Transformations are pure SQL - no Python UDFs.
-
-```python
-# transform/sql_engine.py
-class SQLEngine:
-    """Executes parameterized SQL transformations."""
-    
-    def execute(self, sql_path: str, variables: dict, source_view: str) -> DataFrame:
-        """Load SQL, substitute variables, execute and return result."""
-        pass
-```
-
-#### 10.3.6 Orchestration Layer (`orchestration/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `orchestrator.py` | Main `BatchOrchestrator` class coordinating all processing |
-| `dependency_resolver.py` | Resolves table processing order based on `depends_on` config |
-| `parallel_executor.py` | Executes independent tables in parallel using ThreadPoolExecutor |
-
-**Key Design**: Orchestrator is the only module with knowledge of the full pipeline.
-
-```python
-# orchestration/orchestrator.py
-class BatchOrchestrator:
-    """Coordinates batch processing for all configured tables."""
-    
-    def __init__(self, spark: SparkSession, config_path: str):
-        self.reader = IncrementalReader(spark)
-        self.sql_engine = SQLEngine(spark)
-        self.control_table = ControlTableManager(spark)
-        # ... inject other dependencies
-    
-    def run(self, table_filter: list[str] = None) -> list[ProcessingResult]:
-        """Process all tables in dependency order."""
-        pass
-```
-
-#### 10.3.7 Config Layer (`config/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `loader.py` | Loads `tables_config.json` from workspace or local filesystem |
-| `validator.py` | Validates config against schema, checks required fields |
-| `schema.py` | Defines `TableConfig`, `GlobalSettings` dataclasses/Pydantic models |
-
-**Key Design**: Configuration is validated at load time, failing fast on invalid config.
-
-```python
-# config/schema.py
-from dataclasses import dataclass, field
-from typing import Optional
-
-@dataclass
-class TimezoneConfig:
-    """Timezone conversion configuration."""
-    source_timezone: str = "UTC"
-    target_timezone: str = "America/New_York"
-    timestamp_columns: list[str] = field(default_factory=list)
-
-@dataclass
-class ReferenceTable:
-    """Reference table configuration for lookups."""
-    alias: str                          # Temp view name for SQL
-    table: str                          # Fully qualified table name
-    filter: Optional[str] = None        # Optional WHERE clause
-    broadcast: bool = False             # Use broadcast hint
-    max_rows: int = 50000               # Safety limit
-
-@dataclass
-class SCD2Columns:
-    """SCD Type 2 metadata column names."""
-    effective_start_date: str = "effective_start_date"
-    effective_end_date: str = "effective_end_date"
-    is_current: str = "is_current"
-
-@dataclass
-class TableConfig:
-    """Complete table configuration - single source of truth."""
-    # Identity
-    table_name: str                     # Unique identifier
-    source_table: str                   # Fully qualified Bronze table
-    target_table: str                   # Fully qualified Silver table
-    
-    # SCD Configuration
-    scd_type: int                       # 1 = Upsert, 2 = History
-    business_key_columns: list[str]     # Natural key columns
-    source_system_column: str = "source_system"
-    
-    # Orchestration (Single Source of Truth)
-    sub_domain: str = "default"         # Execution group (party, claims, etc.)
-    sequence: int = 1                   # Order within sub_domain
-    critical: bool = False              # Halt on failure if True
-    
-    # Watermark & Dedup
-    watermark_column: str = "ingestion_ts"
-    lookback_interval: str = "2 HOURS"
-    dedup_order_columns: list[str] = field(
-        default_factory=lambda: ["ingestion_ts DESC"]
-    )
-    
-    # SCD2-Specific
-    scd2_columns: Optional[SCD2Columns] = None
-    track_columns: list[str] = field(default_factory=list)
-    
-    # Transformations
-    transformation_sql_path: Optional[str] = None
-    timezone_config: Optional[TimezoneConfig] = None
-    reference_tables: list[ReferenceTable] = field(default_factory=list)
-    
-    # Control
-    enabled: bool = True
-
-@dataclass
-class GlobalSettings:
-    """Global framework settings."""
-    catalog: str = "main"
-    schema_bronze: str = "bronze"
-    schema_silver: str = "silver"
-    control_table: str = "silver.curation_control"
-    audit_table: str = "silver.curation_audit_log"
-    default_watermark_column: str = "ingestion_ts"
-    default_lookback_interval: str = "2 HOURS"
-    default_dedup_order_columns: list[str] = field(
-        default_factory=lambda: ["ingestion_ts DESC"]
-    )
-    scd2_end_date_value: str = "9999-12-31 23:59:59"
-    default_source_timezone: str = "UTC"
-    default_target_timezone: str = "America/New_York"
-    log_level: str = "INFO"
-    allowed_variables: list[str] = field(default_factory=lambda: [
-        "source_timezone", "target_timezone", "catalog",
-        "schema_silver", "processing_date"
-    ])
-```
-
-#### 10.3.8 Utils Layer (`utils/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `spark_utils.py` | SparkSession creation, dbutils access |
-| `delta_utils.py` | OPTIMIZE, VACUUM, table existence checks |
-| `datetime_utils.py` | Timezone conversion, timestamp parsing |
-
-### 10.4 Module Dependency Graph
+### 10.3 Resource Structure (Job Definitions)
 
 ```
-                    ┌─────────────────┐
-                    │ job_executor.py │
-                    │  (Entry Point)  │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │  orchestration/ │
-                    │   orchestrator  │
-                    └────────┬────────┘
-                             │
-         ┌───────────────────┼───────────────────┐
-         │                   │                   │
-         ▼                   ▼                   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│     config/     │ │ reader/ writer/ │ │   transform/    │
-│  loader, schema │ │     audit/      │ │   sql_engine    │
-└────────┬────────┘ └────────┬────────┘ └────────┬────────┘
-         │                   │                   │
-         │                   ▼                   │
-         │          ┌─────────────────┐          │
-         │          │      core/      │◀─────────┘
-         │          │ scd1, scd2, dedup│
-         │          └────────┬────────┘
-         │                   │
-         ▼                   ▼
-┌─────────────────────────────────────────────────────────┐
-│                      utils/                             │
-│     spark_utils, delta_utils, datetime_utils            │
-└─────────────────────────────────────────────────────────┘
+resources/
+└── job/
+    └── <domain>/
+        └── <job_name>.yml
 ```
 
-**Dependency Rules:**
-1. **Downward Only**: Higher layers depend on lower layers, never the reverse.
-2. **No Circular**: Modules within the same layer do not depend on each other.
-3. **Utils at Bottom**: `utils/` is foundational, used everywhere.
-4. **Config Isolated**: `config/` only loads data, has no processing logic.
-
-### 10.5 Key Interfaces
-
-```python
-# Public API exported from __init__.py
-from curation_framework.orchestration import BatchOrchestrator
-from curation_framework.core import SCD1Processor, SCD2Processor
-from curation_framework.config import TableConfig, load_config
-from curation_framework.reader import IncrementalReader, ControlTableManager
-from curation_framework.writer import MergeExecutor
-from curation_framework.audit import AuditLogger
-
-__all__ = [
-    "BatchOrchestrator",
-    "SCD1Processor", 
-    "SCD2Processor",
-    "TableConfig",
-    "load_config",
-    "IncrementalReader",
-    "ControlTableManager",
-    "MergeExecutor",
-    "AuditLogger",
-]
+**Example:**
+```
+resources/
+└── job/
+    └── claims/
+        └── claims_daily.yml
 ```
 
-### 10.6 Testing Strategy per Module
+### 10.4 Job YAML Schema
 
-| Layer | Test Type | Mock Dependencies |
-|-------|-----------|-------------------|
-| `core/` | Unit tests | Mock DataFrame, DeltaTable |
-| `reader/` | Integration tests | Spark local, temp Delta tables |
-| `writer/` | Integration tests | Spark local, temp Delta tables |
-| `audit/` | Unit tests | Mock Spark writes |
-| `transform/` | Unit tests | Mock SQL files, temp views |
-| `orchestration/` | Integration tests | Mock all processors |
-| `config/` | Unit tests | Test JSON files |
-| `utils/` | Unit tests | Minimal mocking |
+```yaml
+# resources/job/claims/claims_daily.yml
+
+job_name: claims_daily
+domain: claims
+description: "Daily incremental load for Claims domain"
+
+execution:
+  mode: parallel              # parallel | sequential
+  max_parallel: 4             # Max concurrent tables
+  fail_fast: true             # Stop all if one fails
+
+tables:
+  - name: customer
+    dependencies: []
+    
+  - name: claims
+    dependencies: [customer]  # Waits for customer to complete
+```
+
+**Convention-Based Path Resolution:**
+
+| Artifact | Convention |
+|----------|------------|
+| Metadata | `metadata/sdl/{domain}/{table}.json` |
+| Query | `query/{table}.sql` |
+
+### 10.5 Load Strategy Types
+
+| Strategy | Metadata Value | Behavior | Use Case |
+|----------|----------------|----------|----------|
+| SCD Type 2 | `scd2` | Track full history with effective dates | Slowly changing dimensions |
+| SCD Type 1 | `scd1` | Upsert (overwrite, no history) | Current state only |
+| Insert Only | `insert_only` | Append only, no updates | Event/transaction logs |
+| Delete-Insert | `delete_insert` | Delete partition, then insert | Partition-based refresh |
+| Truncate-Insert | `truncate_insert` | Full table refresh | Small reference tables |
+
+**Metadata Configuration per Strategy:**
+
+| Strategy | Required Fields |
+|----------|-----------------|
+| `scd2` | `business_keys`, `scd2_mode`, `scd2_columns` |
+| `scd1` | `business_keys` |
+| `insert_only` | (none) |
+| `delete_insert` | `partition_columns` |
+| `truncate_insert` | (none) |
+
+### 10.6 Execution Flow
+
+```
+executor/job_executor.py
+   │
+   ├── config/metadata_loader.py     → Load job YAML + table metadata
+   ├── config/environment.py         → Resolve catalog from bundle
+   │
+   ├── Build dependency DAG from tables[].dependencies
+   │
+   └── For each table (parallel with max_parallel):
+       │
+       └── pipeline/lakeflow_curation_pipeline.py
+               │
+               ├── state/watermark.py           → Get last watermark
+               │
+               ├── reader/source_reader.py      → Read source (filtered by watermark)
+               ├── reader/reference_reader.py   → Load reference tables
+               │
+               ├── transform/template_resolver.py → Load SQL + resolve placeholders
+               ├── transform/hash_generator.py    → Generate hash expressions
+               ├── transform/sql_executor.py      → Execute SQL
+               │
+               ├── utils/dedup.py                → Deduplicate (if needed)
+               │
+               ├── load_strategy/factory.py      → Select strategy (scd2, scd1, etc.)
+               ├── load_strategy/<type>.py       → Apply load strategy
+               │
+               ├── writer/delta_writer.py        → Write to target
+               │
+               └── state/watermark.py            → Update watermark
+
+```
+
+### 10.7 Parallel Execution DAG
+
+For a job with multiple tables:
+
+```yaml
+tables:
+  - name: customer
+    dependencies: []
+    
+  - name: policy
+    dependencies: []
+    
+  - name: adjuster_lookup
+    dependencies: []
+    
+  - name: claims
+    dependencies: [customer, policy]
+    
+  - name: claim_payments
+    dependencies: [claims]
+```
+
+**Execution Order:**
+
+```
+Wave 1 (parallel):
+  ├── customer
+  ├── policy
+  └── adjuster_lookup
+
+Wave 2 (after Wave 1):
+  └── claims
+
+Wave 3 (after Wave 2):
+  └── claim_payments
+```
 
 ## 11. Key Design Decisions
 

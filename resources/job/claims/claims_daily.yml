@@ -1,0 +1,16 @@
+# Claims Daily Job - Parallel execution for Claims domain
+job_name: claims_daily
+domain: claims
+description: "Daily incremental load for Claims domain"
+
+execution:
+  mode: parallel
+  max_parallel: 4
+  fail_fast: true
+
+tables:
+  - name: customer
+    dependencies: []
+    
+  - name: claims
+    dependencies: [customer]
