@@ -181,6 +181,7 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 - **Ordering**: `ORDER BY ingestion_ts DESC, <tiebreaker> DESC` (configured via `dedup_order_columns`)
 - **Rule**: Keep the **first** record per dedup key after ordering (latest by time, stable by tiebreaker).
 - **Mandatory Step**: This reduction to one row per entity **must** occur before SCD merge.
+- **Ownership**: Dedup is **framework-driven**, not implemented in developer SQL.
 
 **Tiebreaker Configuration (Required for Determinism):**
 - **Recommended**: If `_kafka_offset` is available in Bronze, use it as the primary tiebreaker: `["ingestion_ts DESC", "_kafka_offset DESC"]`
@@ -194,6 +195,62 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 > - Partition changes
 >
 > **Mitigation**: Always configure a tiebreaker column. If unavailable, document this as a known limitation and monitor for duplicate keys in source data.
+
+### 3.1.1 Ownership Model: Framework vs Developer Responsibilities
+
+The framework enforces a clear separation of concerns between **infrastructure** (framework) and **business logic** (developer).
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                    FRAMEWORK RESPONSIBILITIES                           │
+│                     (Infrastructure Layer)                              │
+├───────────────────────────────────────────────────────────────────────────┤
+│  1. Read Bronze with watermark + lookback filter                        │
+│  2. Apply metadata-driven deduplication (ROW_NUMBER)                    │
+│  3. Register temp views: `source_deduped`, reference tables             │
+│  4. Substitute ${variables} in SQL                                      │
+│  5. Execute developer SQL                                               │
+│  6. Validate output schema (required columns present)                   │
+│  7. Cache/persist prepared DataFrame                                    │
+│  8. Execute SCD1 or SCD2 merge                                          │
+│  9. Update watermark in control table                                   │
+│  10. Write audit log                                                    │
+└───────────────────────────────────────────────────────────────────────────┘
+                                │
+                                │ Provides: source_deduped, ref_* views
+                                ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                    DEVELOPER RESPONSIBILITIES                           │
+│                   (Transformation SQL per Table)                        │
+├───────────────────────────────────────────────────────────────────────────┤
+│  1. Read from `source_deduped` (NOT source_incremental)                 │
+│  2. Join to reference tables (ref_providers, ref_icd_codes, etc.)      │
+│  3. Apply business logic, cleansing, type casting                      │
+│  4. Apply timezone conversions using ${variables}                      │
+│  5. Compute `_pk_hash` = SHA2(business_keys + source_system)            │
+│  6. Compute `_diff_hash` = SHA2(track_columns) for SCD2                 │
+│  7. Return transformed DataFrame with required columns                 │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+**Contract: Framework-Provided Temp Views**
+
+| View Name | Description | Created By |
+|-----------|-------------|------------|
+| `source_deduped` | Deduplicated source data (one row per entity) | Framework |
+| `ref_<alias>` | Reference table (e.g., `ref_providers`) | Framework |
+
+**Contract: Developer SQL Must NOT:**
+- Implement deduplication (no `ROW_NUMBER()` partitioned by business keys)
+- Read directly from `source_incremental` (use `source_deduped` instead)
+- Manage watermarks or control tables
+- Implement SCD merge logic
+
+**Contract: Developer SQL MUST:**
+- Read from `source_deduped`
+- Output `_pk_hash` column (for all tables)
+- Output `_diff_hash` column (for SCD2 tables)
+- Output all business columns needed in Silver
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -503,124 +560,120 @@ The framework replaces `${variable_name}` placeholders in SQL files with values 
 
 This section demonstrates a complete end-to-end transformation for the `Claims` entity.
 
-**Step 1: Base Source Query (Before Enrichment)**
+**Framework Pre-Processing (Before SQL Execution):**
 
-```sql
--- conf/sql/claims_transform_base.sql
--- Raw query without parameterization
-SELECT
-  claim_id,
-  claimant_id,
-  provider_id,
-  policy_id,
-  diagnosis_code,
-  claim_amount,
-  claim_status,
-  service_date,
-  submitted_at,
-  source_system,
-  ingestion_ts
-FROM source_incremental
+```python
+# Framework creates these views BEFORE executing developer SQL
+
+# 1. Read Bronze with watermark + lookback
+source_incremental = spark.sql(f"""
+    SELECT * FROM {source_table}
+    WHERE {watermark_column} > ('{last_watermark}' - INTERVAL {lookback_interval})
+""")
+source_incremental.createOrReplaceTempView("source_incremental")
+
+# 2. Apply metadata-driven deduplication
+dedup_sql = f"""
+    SELECT * FROM (
+        SELECT *,
+            ROW_NUMBER() OVER (
+                PARTITION BY {', '.join(business_key_columns)}, {source_system_column}
+                ORDER BY {', '.join(dedup_order_columns)}
+            ) AS _dedup_rank
+        FROM source_incremental
+    ) WHERE _dedup_rank = 1
+"""
+source_deduped = spark.sql(dedup_sql).drop("_dedup_rank")
+source_deduped.createOrReplaceTempView("source_deduped")
+
+# 3. Register reference tables
+for ref in reference_tables:
+    ref_df = spark.table(ref.table)
+    if ref.filter:
+        ref_df = ref_df.filter(ref.filter)
+    ref_df.createOrReplaceTempView(ref.alias)
 ```
 
-**Step 2: Enriched Query with All Transformation Parameters**
+**Developer Transformation SQL (Reads from `source_deduped`):**
 
 ```sql
 -- conf/sql/claims_transform.sql
--- Full transformation with timezone, reference data, and SCD2 preparation
+-- Developer writes business logic, cleansing, and hash computation
+-- Reads from `source_deduped` (framework-provided, already deduplicated)
 
-WITH deduplicated AS (
-  -- Step 1: Intra-batch deduplication (one row per entity per batch)
-  SELECT *
-  FROM (
-    SELECT 
-      *,
-      ROW_NUMBER() OVER (
-        PARTITION BY claim_id, source_system 
-        ORDER BY ingestion_ts DESC
-      ) AS _row_num
-    FROM source_incremental
-  )
-  WHERE _row_num = 1
-),
-
-transformed AS (
-  SELECT
-    -- Business Keys
-    s.claim_id,
-    s.source_system,
-    
-    -- Foreign Keys
-    s.claimant_id,
-    s.provider_id,
-    s.policy_id,
-    
-    -- Timezone Conversion: UTC -> Target Timezone
-    FROM_UTC_TIMESTAMP(s.service_date, '${target_timezone}') AS service_date,
-    FROM_UTC_TIMESTAMP(s.submitted_at, '${target_timezone}') AS submitted_at,
-    
-    -- Reference Data Enrichment: Provider
-    p.provider_name,
-    p.provider_npi,
-    p.provider_type,
-    
-    -- Reference Data Enrichment: ICD Codes
-    s.diagnosis_code,
-    icd.diagnosis_description,
-    icd.diagnosis_category,
-    icd.is_chronic,
-    
-    -- Reference Data Enrichment: Claim Status
-    s.claim_status AS claim_status_code,
-    cs.status_description AS claim_status_desc,
-    
-    -- Business Logic: Computed Fields
-    s.claim_amount,
-    CASE 
-      WHEN s.claim_amount > 10000 THEN 'HIGH'
-      WHEN s.claim_amount > 1000 THEN 'MEDIUM'
-      ELSE 'LOW'
-    END AS claim_tier,
-    
-    -- Data Quality: Cleansing
-    TRIM(UPPER(s.claim_status)) AS claim_status_clean,
-    COALESCE(s.claim_amount, 0) AS claim_amount_safe,
-    
-    -- Hash Keys for SCD2
-    SHA2(CONCAT_WS('|', 
-      COALESCE(CAST(s.claim_id AS STRING), '__NULL__'),
-      COALESCE(s.source_system, '__NULL__')
-    ), 256) AS _pk_hash,
-    
-    SHA2(CONCAT_WS('|',
-      COALESCE(s.claim_status, '__NULL__'),
-      COALESCE(CAST(s.claim_amount AS STRING), '__NULL__'),
-      COALESCE(s.diagnosis_code, '__NULL__'),
-      COALESCE(CAST(s.provider_id AS STRING), '__NULL__')
-    ), 256) AS _diff_hash,
-    
-    -- Metadata
-    s.ingestion_ts,
-    CURRENT_TIMESTAMP() AS processing_timestamp
-    
-  FROM deduplicated s
+SELECT
+  -- Business Keys
+  s.claim_id,
+  s.source_system,
   
-  -- Reference Data JOINs
-  LEFT JOIN /*+ BROADCAST(ref_providers) */ ref_providers p
-    ON s.provider_id = p.provider_id
-    AND p.is_current = true
-    
-  LEFT JOIN /*+ BROADCAST(ref_icd_codes) */ ref_icd_codes icd
-    ON s.diagnosis_code = icd.icd_code
-    
-  LEFT JOIN /*+ BROADCAST(ref_claim_status) */ ref_claim_status cs
-    ON TRIM(UPPER(s.claim_status)) = cs.status_code
-)
+  -- Foreign Keys
+  s.claimant_id,
+  s.provider_id,
+  s.policy_id,
+  
+  -- Timezone Conversion: UTC -> Target Timezone
+  FROM_UTC_TIMESTAMP(s.service_date, '${target_timezone}') AS service_date,
+  FROM_UTC_TIMESTAMP(s.submitted_at, '${target_timezone}') AS submitted_at,
+  
+  -- Reference Data Enrichment: Provider
+  p.provider_name,
+  p.provider_npi,
+  p.provider_type,
+  
+  -- Reference Data Enrichment: ICD Codes
+  s.diagnosis_code,
+  icd.diagnosis_description,
+  icd.diagnosis_category,
+  icd.is_chronic,
+  
+  -- Reference Data Enrichment: Claim Status
+  s.claim_status AS claim_status_code,
+  cs.status_description AS claim_status_desc,
+  
+  -- Business Logic: Computed Fields
+  s.claim_amount,
+  CASE 
+    WHEN s.claim_amount > 10000 THEN 'HIGH'
+    WHEN s.claim_amount > 1000 THEN 'MEDIUM'
+    ELSE 'LOW'
+  END AS claim_tier,
+  
+  -- Data Quality: Cleansing
+  TRIM(UPPER(s.claim_status)) AS claim_status_clean,
+  COALESCE(s.claim_amount, 0) AS claim_amount_safe,
+  
+  -- *** REQUIRED: Hash Keys (Developer Computes) ***
+  SHA2(CONCAT_WS('|', 
+    COALESCE(CAST(s.claim_id AS STRING), '__NULL__'),
+    COALESCE(s.source_system, '__NULL__')
+  ), 256) AS _pk_hash,
+  
+  SHA2(CONCAT_WS('|',
+    COALESCE(s.claim_status, '__NULL__'),
+    COALESCE(CAST(s.claim_amount AS STRING), '__NULL__'),
+    COALESCE(s.diagnosis_code, '__NULL__'),
+    COALESCE(CAST(s.provider_id AS STRING), '__NULL__')
+  ), 256) AS _diff_hash,
+  
+  -- Metadata
+  s.ingestion_ts,
+  CURRENT_TIMESTAMP() AS processing_timestamp
 
-SELECT * FROM transformed
+FROM source_deduped s  -- ⭐ Read from framework-provided deduplicated view
+
+-- Reference Data JOINs (framework registers these views)
+LEFT JOIN /*+ BROADCAST(ref_providers) */ ref_providers p
+  ON s.provider_id = p.provider_id
+  AND p.is_current = true
+  
+LEFT JOIN /*+ BROADCAST(ref_icd_codes) */ ref_icd_codes icd
+  ON s.diagnosis_code = icd.icd_code
+  
+LEFT JOIN /*+ BROADCAST(ref_claim_status) */ ref_claim_status cs
+  ON TRIM(UPPER(s.claim_status)) = cs.status_code
 ```
 
-**Step 3: How SCD Type 2 Uses This Query**
+**Key Contract Enforcement:**\n- ✅ SQL reads from `source_deduped` (not `source_incremental`)\n- ✅ SQL outputs `_pk_hash` (required for all tables)\n- ✅ SQL outputs `_diff_hash` (required for SCD2)\n- ✅ SQL does NOT implement dedup logic (no ROW_NUMBER partition by keys)\n- ✅ Reference tables accessed via framework-registered views\n\n**Framework Post-Processing (After SQL Execution):**
 
 The framework takes the output of the transformation SQL and applies SCD2 logic:
 
@@ -666,15 +719,99 @@ FROM changes
 WHERE _action IN ('INSERT', 'UPDATE');
 ```
 
-**Transformation Parameter Summary:**
+**Responsibility Summary:**
 
-| Parameter Type | Example in Query | Config Source |
-|----------------|------------------|---------------|
-| Timezone | `FROM_UTC_TIMESTAMP(..., '${target_timezone}')` | `timezone_config` |
-| Reference Table | `LEFT JOIN ref_providers` | `reference_tables` |
-| Hash Algorithm | `SHA2(..., 256)` | Framework default |
-| Dedup Logic | `ROW_NUMBER() OVER (PARTITION BY ...)` | `dedup_order_columns` |
-| Track Columns | Included in `_diff_hash` | `track_columns` |
+| Concern | Owner | Location |
+|---------|-------|----------|
+| Watermark + Lookback Filter | Framework | `io/reader.py` |
+| Deduplication | Framework | `core/dedup.py` (metadata-driven) |
+| Reference View Registration | Framework | `transform/reference_loader.py` |
+| Variable Substitution | Framework | `transform/sql_engine.py` |
+| Business Logic & Joins | Developer | `conf/sql/<table>_transform.sql` |
+| Hash Computation (`_pk_hash`, `_diff_hash`) | Developer | `conf/sql/<table>_transform.sql` |
+| SCD Merge Execution | Framework | `core/scd1_processor.py`, `core/scd2_processor.py` |
+| Watermark Update | Framework | `io/control_table.py` |
+| Audit Logging | Framework | `observability/audit.py` |
+
+### 5.0.5 Validation Rules
+
+The framework enforces these rules at startup and runtime to prevent configuration drift and ensure contract compliance.
+
+**Startup Validation (Config Load):**
+
+| Rule | Severity | Description |
+|------|----------|-------------|
+| `dedup_order_columns` has tiebreaker | WARN | Warn if only timestamp column configured (collision risk) |
+| `business_key_columns` non-empty | ERROR | Fail if dedup partition key is empty |
+| `source_system_column` defined | ERROR | Required for composite dedup key |
+| `track_columns` defined for SCD2 | WARN | Warn if SCD2 table has no track columns |
+| Unique `(sub_domain, sequence)` | ERROR | No duplicate sequences within sub-domain |
+
+**Runtime Validation (After SQL Execution):**
+
+| Rule | Severity | Description |
+|------|----------|-------------|
+| Output has `_pk_hash` column | ERROR | Required for all tables |
+| Output has `_diff_hash` column | ERROR | Required for SCD2 tables |
+| Output has business key columns | ERROR | Must match config `business_key_columns` |
+| Output has `source_system` column | ERROR | Must match config `source_system_column` |
+| SQL does not contain dedup pattern | WARN | Warn if `ROW_NUMBER.*PARTITION BY.*business_key` detected |
+
+**Validation Implementation:**
+
+```python
+# config/validator.py
+def validate_table_config(config: TableConfig) -> list[ValidationError]:
+    errors = []
+    warnings = []
+    
+    # Startup validations
+    if not config.business_key_columns:
+        errors.append(ValidationError("business_key_columns cannot be empty"))
+    
+    if not config.source_system_column:
+        errors.append(ValidationError("source_system_column is required"))
+    
+    if len(config.dedup_order_columns) == 1:
+        warnings.append(ValidationWarning(
+            f"Table {config.table_name}: Only one dedup_order_column configured. "
+            "Timestamp collisions may cause non-deterministic selection. "
+            "Consider adding a tiebreaker column like _kafka_offset."
+        ))
+    
+    if config.scd_type == 2 and not config.track_columns:
+        warnings.append(ValidationWarning(
+            f"Table {config.table_name}: SCD2 table has no track_columns. "
+            "All columns will be tracked for changes."
+        ))
+    
+    return errors, warnings
+
+
+def validate_sql_output(df: DataFrame, config: TableConfig) -> list[ValidationError]:
+    errors = []
+    
+    # Check required columns
+    columns = set(df.columns)
+    
+    if "_pk_hash" not in columns:
+        errors.append(ValidationError(
+            f"Table {config.table_name}: SQL output missing required column '_pk_hash'"
+        ))
+    
+    if config.scd_type == 2 and "_diff_hash" not in columns:
+        errors.append(ValidationError(
+            f"Table {config.table_name}: SCD2 table SQL output missing required column '_diff_hash'"
+        ))
+    
+    for key_col in config.business_key_columns:
+        if key_col not in columns:
+            errors.append(ValidationError(
+                f"Table {config.table_name}: SQL output missing business key column '{key_col}'"
+            ))
+    
+    return errors
+```
 
 ### 5.1 Table Configuration
 
