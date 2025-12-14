@@ -456,16 +456,18 @@ class BatchFrameworkOrchestrator:
     based on metadata configuration.
     """
 
-    def __init__(self, spark: SparkSession, config_path: str):
+    def __init__(self, spark: SparkSession, config_path: str, global_config_path: Optional[str] = None):
         """
         Initialize the orchestrator with configuration.
 
         Args:
             spark: Active SparkSession
-            config_path: Path to tables_config.json
+            config_path: Path to table config file or directory
+            global_config_path: Path to global settings file (optional)
         """
         self.spark = spark
         self.config_path = config_path
+        self.global_config_path = global_config_path
         self.config = self._load_config()
         self.logger = self._setup_logger()
 
@@ -485,22 +487,44 @@ class BatchFrameworkOrchestrator:
         
         return logger
 
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from JSON file."""
+    def _read_json_file(self, path: str) -> Dict[str, Any]:
+        """Helper to read JSON file from DBFS or local."""
         import json
-        
         try:
             # Try reading from DBFS/Workspace
-            config_df = self.spark.read.text(f"file:{self.config_path}")
+            config_df = self.spark.read.text(f"file:{path}")
             json_str = "\n".join([row.value for row in config_df.collect()])
             return json.loads(json_str)
         except Exception:
             # Fallback: read from local file system
             try:
-                with open(self.config_path, 'r') as f:
+                with open(path, 'r') as f:
                     return json.load(f)
             except Exception as e:
-                raise RuntimeError(f"Failed to load config from {self.config_path}: {str(e)}")
+                raise RuntimeError(f"Failed to load config from {path}: {str(e)}")
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Load configuration from JSON file(s)."""
+        config = {"tables": [], "global_settings": {}}
+        
+        # Load global settings if provided
+        if self.global_config_path:
+            config["global_settings"] = self._read_json_file(self.global_config_path)
+            
+        # Load table config(s)
+        loaded_config = self._read_json_file(self.config_path)
+        
+        if "tables" in loaded_config:
+            # Legacy format: single file with "tables" array
+            config["tables"] = loaded_config["tables"]
+            if "global_settings" in loaded_config:
+                # Merge or override global settings
+                config["global_settings"].update(loaded_config["global_settings"])
+        else:
+            # Single table config file
+            config["tables"].append(loaded_config)
+            
+        return config
 
     def process_table(self, table_config: Dict[str, Any]) -> Dict[str, Any]:
         """

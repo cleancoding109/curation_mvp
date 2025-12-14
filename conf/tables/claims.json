@@ -1,0 +1,15 @@
+{
+  "table_name": "claims",
+  "source_table": "ltc_insurance.unified_dev.unified_claims_scd2",
+  "target_table": "ltc_insurance.standardized_data_layer.claims",
+  "scd_type": 1,
+  "business_key_columns": ["claim_id"],
+  "source_system_column": "source_system",
+  "watermark_column": "ingestion_ts",
+  "target_watermark_column": "processing_timestamp",
+  "lookback_interval": "1 HOURS",
+  "dedup_order_columns": ["ingestion_ts DESC"],
+  "transformation_sql_path": "conf/sql/claims_transform.sql",
+  "enabled": true,
+  "description": "Standardized Claims Data"
+}

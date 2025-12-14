@@ -1,9 +1,9 @@
 {
   "tables": [
     {
-      "table_name": "unified_customer",
+      "table_name": "customer",
       "source_table": "ltc_insurance.unified_dev.unified_customer_scd2",
-      "target_table": "ltc_insurance.standardized_data_layer.unified_customer",
+      "target_table": "ltc_insurance.standardized_data_layer.customer",
       "scd_type": 2,
       "business_key_columns": ["customer_id"],
       "source_system_column": "source_system",
@@ -17,21 +17,22 @@
         "is_current": "is_current"
       },
       "track_columns": [
-        "first_name",
-        "last_name",
-        "dob",
-        "address",
-        "phone",
-        "email"
+        "full_name",
+        "date_of_birth",
+        "email",
+        "phone_number",
+        "state_code",
+        "postal_code",
+        "customer_status"
       ],
-      "transformation_sql_path": "conf/sql/unified_customer_transform.sql",
+      "transformation_sql_path": "conf/sql/customer_transform.sql",
       "enabled": true,
-      "description": "Unified Customer Data"
+      "description": "Standardized Customer Data with History"
     },
     {
-      "table_name": "unified_claims",
+      "table_name": "claims",
       "source_table": "ltc_insurance.unified_dev.unified_claims_scd2",
-      "target_table": "ltc_insurance.standardized_data_layer.unified_claims",
+      "target_table": "ltc_insurance.standardized_data_layer.claims",
       "scd_type": 1,
       "business_key_columns": ["claim_id"],
       "source_system_column": "source_system",
@@ -39,54 +40,9 @@
       "target_watermark_column": "processing_timestamp",
       "lookback_interval": "1 HOURS",
       "dedup_order_columns": ["ingestion_ts DESC"],
-      "transformation_sql_path": "conf/sql/unified_claims_transform.sql",
+      "transformation_sql_path": "conf/sql/claims_transform.sql",
       "enabled": true,
-      "description": "Unified Claims Data"
-    },
-    {
-      "table_name": "unified_service",
-      "source_table": "ltc_insurance.unified_dev.unified_service_scd2",
-      "target_table": "ltc_insurance.standardized_data_layer.unified_service",
-      "scd_type": 1,
-      "business_key_columns": ["service_id"],
-      "source_system_column": "source_system",
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "lookback_interval": "1 HOURS",
-      "dedup_order_columns": ["ingestion_ts DESC"],
-      "transformation_sql_path": "conf/sql/unified_service_transform.sql",
-      "enabled": true,
-      "description": "Unified Service Data"
-    },
-    {
-      "table_name": "pega_underwriting",
-      "source_table": "ltc_insurance.unified_dev.pega_underwriting_scd2",
-      "target_table": "ltc_insurance.standardized_data_layer.pega_underwriting",
-      "scd_type": 1,
-      "business_key_columns": ["case_id"],
-      "source_system_column": "source_system",
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "lookback_interval": "1 HOURS",
-      "dedup_order_columns": ["ingestion_ts DESC"],
-      "transformation_sql_path": "conf/sql/pega_underwriting_transform.sql",
-      "enabled": true,
-      "description": "Pega Underwriting Data"
-    },
-    {
-      "table_name": "unified_underwriting",
-      "source_table": "ltc_insurance.unified_dev.unified_underwriting_scd2",
-      "target_table": "ltc_insurance.standardized_data_layer.unified_underwriting",
-      "scd_type": 1,
-      "business_key_columns": ["underwriting_id"],
-      "source_system_column": "source_system",
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "lookback_interval": "1 HOURS",
-      "dedup_order_columns": ["ingestion_ts DESC"],
-      "transformation_sql_path": "conf/sql/unified_underwriting_transform.sql",
-      "enabled": true,
-      "description": "Unified Underwriting Data"
+      "description": "Standardized Claims Data"
     }
   ],
   "global_settings": {
