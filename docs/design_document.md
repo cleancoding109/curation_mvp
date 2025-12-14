@@ -723,15 +723,15 @@ WHERE _action IN ('INSERT', 'UPDATE');
 
 | Concern | Owner | Location |
 |---------|-------|----------|
-| Watermark + Lookback Filter | Framework | `io/reader.py` |
+| Watermark + Lookback Filter | Framework | `reader/incremental_reader.py` |
 | Deduplication | Framework | `core/dedup.py` (metadata-driven) |
 | Reference View Registration | Framework | `transform/reference_loader.py` |
 | Variable Substitution | Framework | `transform/sql_engine.py` |
 | Business Logic & Joins | Developer | `conf/sql/<table>_transform.sql` |
 | Hash Computation (`_pk_hash`, `_diff_hash`) | Developer | `conf/sql/<table>_transform.sql` |
 | SCD Merge Execution | Framework | `core/scd1_processor.py`, `core/scd2_processor.py` |
-| Watermark Update | Framework | `io/control_table.py` |
-| Audit Logging | Framework | `observability/audit.py` |
+| Watermark Update | Framework | `reader/control_table.py` |
+| Audit Logging | Framework | `audit/audit_logger.py` |
 
 ### 5.0.5 Validation Rules
 
@@ -1273,11 +1273,23 @@ src/curation_framework/
 │   ├── scd2_processor.py          # SCD Type 2 hash-based merge
 │   └── dedup.py                   # Entity-level deduplication
 │
-├── io/                            # Input/Output Modules
+├── reader/                        # Source Reading Modules
 │   ├── __init__.py
-│   ├── reader.py                  # Incremental source reader
-│   ├── writer.py                  # Delta table writer
-│   └── control_table.py           # Watermark control table manager
+│   ├── incremental_reader.py      # Watermark + lookback incremental read
+│   ├── control_table.py           # Watermark control table manager
+│   └── bronze_reader.py           # Bronze-specific read utilities
+│
+├── writer/                        # Target Writing Modules
+│   ├── __init__.py
+│   ├── delta_writer.py            # Delta table write operations
+│   ├── merge_executor.py          # SCD merge execution
+│   └── table_manager.py           # Table creation, schema evolution
+│
+├── audit/                         # Audit & Observability Modules
+│   ├── __init__.py
+│   ├── audit_logger.py            # Audit log table writer
+│   ├── metrics_collector.py       # Processing metrics collection
+│   └── run_tracker.py             # Run ID and status tracking
 │
 ├── transform/                     # Transformation Modules
 │   ├── __init__.py
@@ -1296,12 +1308,6 @@ src/curation_framework/
 │   ├── loader.py                  # JSON config loading
 │   ├── validator.py               # Schema validation
 │   └── schema.py                  # Pydantic/dataclass schemas
-│
-├── observability/                 # Monitoring & Logging Modules
-│   ├── __init__.py
-│   ├── logger.py                  # Structured logging
-│   ├── metrics.py                 # Processing metrics
-│   └── audit.py                   # Audit log writer
 │
 └── utils/                         # Shared Utilities
     ├── __init__.py
@@ -1431,8 +1437,10 @@ The framework uses a **dispatcher pattern** where `job_executor.py` routes execu
 **Dependencies:**
 - `core/dedup.py` - Deduplication logic
 - `core/scd1_processor.py` or `core/scd2_processor.py` - Merge logic
-- `io/reader.py` - Incremental source reading
-- `io/control_table.py` - Watermark management
+- `reader/incremental_reader.py` - Incremental source reading
+- `reader/control_table.py` - Watermark management
+- `writer/merge_executor.py` - SCD merge execution
+- `audit/audit_logger.py` - Audit log writing
 - `transform/sql_engine.py` - SQL execution
 - `transform/reference_loader.py` - Reference table registration
 
@@ -1463,18 +1471,18 @@ class BaseProcessor(ABC):
         pass
 ```
 
-#### 10.2.2 I/O Layer (`io/`)
+#### 10.3.2 Reader Layer (`reader/`)
 
 | Module | Responsibility |
 |--------|---------------|
-| `reader.py` | Reads from Bronze with watermark filter + lookback window |
-| `writer.py` | Writes to Silver Delta tables with optimized settings |
-| `control_table.py` | Manages `curation_control.watermarks` table atomically |
+| `incremental_reader.py` | Reads from Bronze with watermark filter + lookback window |
+| `control_table.py` | Manages `silver.curation_control` watermark table atomically |
+| `bronze_reader.py` | Bronze-specific read utilities and schema validation |
 
-**Key Design**: I/O operations are isolated for testability and potential source abstraction.
+**Key Design**: Reader operations are isolated for testability and source abstraction.
 
 ```python
-# io/reader.py
+# reader/incremental_reader.py
 class IncrementalReader:
     """Reads source data with watermark filtering."""
     
@@ -1483,7 +1491,55 @@ class IncrementalReader:
         pass
 ```
 
-#### 10.2.3 Transform Layer (`transform/`)
+#### 10.3.3 Writer Layer (`writer/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `delta_writer.py` | Writes to Silver Delta tables with optimized settings |
+| `merge_executor.py` | Executes SCD MERGE operations |
+| `table_manager.py` | Table creation, schema evolution, OPTIMIZE/VACUUM |
+
+**Key Design**: Writer operations handle all Delta-specific optimizations.
+
+```python
+# writer/merge_executor.py
+class MergeExecutor:
+    """Executes SCD merge operations."""
+    
+    def execute_scd1_merge(self, source_df: DataFrame, target_table: str, keys: list) -> MergeResult:
+        """Execute SCD Type 1 upsert merge."""
+        pass
+    
+    def execute_scd2_merge(self, source_df: DataFrame, target_table: str, pk_hash: str) -> MergeResult:
+        """Execute SCD Type 2 hash-based merge."""
+        pass
+```
+
+#### 10.3.4 Audit Layer (`audit/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `audit_logger.py` | Writes processing results to `silver.curation_audit_log` |
+| `metrics_collector.py` | Collects processing metrics (records, duration, watermarks) |
+| `run_tracker.py` | Manages run IDs, status tracking, and run metadata |
+
+**Key Design**: Audit is cross-cutting but injected, not hard-coded.
+
+```python
+# audit/audit_logger.py
+class AuditLogger:
+    """Writes processing results to audit log table."""
+    
+    def log_run(self, run_id: str, table_name: str, result: ProcessingResult):
+        """Insert audit record for processing run."""
+        pass
+    
+    def log_error(self, run_id: str, table_name: str, error: Exception):
+        """Insert error audit record."""
+        pass
+```
+
+#### 10.3.5 Transform Layer (`transform/`)
 
 | Module | Responsibility |
 |--------|---------------|
@@ -1503,7 +1559,7 @@ class SQLEngine:
         pass
 ```
 
-#### 10.2.4 Orchestration Layer (`orchestration/`)
+#### 10.3.6 Orchestration Layer (`orchestration/`)
 
 | Module | Responsibility |
 |--------|---------------|
@@ -1529,7 +1585,7 @@ class BatchOrchestrator:
         pass
 ```
 
-#### 10.2.5 Config Layer (`config/`)
+#### 10.3.7 Config Layer (`config/`)
 
 | Module | Responsibility |
 |--------|---------------|
@@ -1627,27 +1683,7 @@ class GlobalSettings:
     ])
 ```
 
-#### 10.2.6 Observability Layer (`observability/`)
-
-| Module | Responsibility |
-|--------|---------------|
-| `logger.py` | Structured logging with JSON format for log analytics |
-| `metrics.py` | Collects processing metrics (records, duration, watermarks) |
-| `audit.py` | Writes to `silver.curation_audit_log` table |
-
-**Key Design**: Observability is cross-cutting but injected, not hard-coded.
-
-```python
-# observability/audit.py
-class AuditLogger:
-    """Writes processing results to audit log table."""
-    
-    def log_run(self, run_id: str, table_name: str, result: ProcessingResult):
-        """Insert audit record for processing run."""
-        pass
-```
-
-#### 10.2.7 Utils Layer (`utils/`)
+#### 10.3.8 Utils Layer (`utils/`)
 
 | Module | Responsibility |
 |--------|---------------|
@@ -1655,11 +1691,11 @@ class AuditLogger:
 | `delta_utils.py` | OPTIMIZE, VACUUM, table existence checks |
 | `datetime_utils.py` | Timezone conversion, timestamp parsing |
 
-### 10.3 Module Dependency Graph
+### 10.4 Module Dependency Graph
 
 ```
                     ┌─────────────────┐
-                    │     main.py     │
+                    │ job_executor.py │
                     │  (Entry Point)  │
                     └────────┬────────┘
                              │
@@ -1673,8 +1709,8 @@ class AuditLogger:
          │                   │                   │
          ▼                   ▼                   ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│     config/     │ │       io/       │ │   transform/    │
-│  loader, schema │ │ reader, writer  │ │   sql_engine    │
+│     config/     │ │ reader/ writer/ │ │   transform/    │
+│  loader, schema │ │     audit/      │ │   sql_engine    │
 └────────┬────────┘ └────────┬────────┘ └────────┬────────┘
          │                   │                   │
          │                   ▼                   │
@@ -1688,28 +1724,24 @@ class AuditLogger:
 │                      utils/                             │
 │     spark_utils, delta_utils, datetime_utils            │
 └─────────────────────────────────────────────────────────┘
-         │                   │
-         ▼                   ▼
-┌─────────────────────────────────────────────────────────┐
-│                   observability/                        │
-│           logger, metrics, audit                        │
-└─────────────────────────────────────────────────────────┘
 ```
 
 **Dependency Rules:**
 1. **Downward Only**: Higher layers depend on lower layers, never the reverse.
 2. **No Circular**: Modules within the same layer do not depend on each other.
-3. **Utils at Bottom**: `utils/` and `observability/` are foundational, used everywhere.
+3. **Utils at Bottom**: `utils/` is foundational, used everywhere.
 4. **Config Isolated**: `config/` only loads data, has no processing logic.
 
-### 10.4 Key Interfaces
+### 10.5 Key Interfaces
 
 ```python
 # Public API exported from __init__.py
 from curation_framework.orchestration import BatchOrchestrator
 from curation_framework.core import SCD1Processor, SCD2Processor
 from curation_framework.config import TableConfig, load_config
-from curation_framework.io import IncrementalReader, ControlTableManager
+from curation_framework.reader import IncrementalReader, ControlTableManager
+from curation_framework.writer import MergeExecutor
+from curation_framework.audit import AuditLogger
 
 __all__ = [
     "BatchOrchestrator",
@@ -1719,19 +1751,22 @@ __all__ = [
     "load_config",
     "IncrementalReader",
     "ControlTableManager",
+    "MergeExecutor",
+    "AuditLogger",
 ]
 ```
 
-### 10.5 Testing Strategy per Module
+### 10.6 Testing Strategy per Module
 
 | Layer | Test Type | Mock Dependencies |
 |-------|-----------|-------------------|
 | `core/` | Unit tests | Mock DataFrame, DeltaTable |
-| `io/` | Integration tests | Spark local, temp Delta tables |
+| `reader/` | Integration tests | Spark local, temp Delta tables |
+| `writer/` | Integration tests | Spark local, temp Delta tables |
+| `audit/` | Unit tests | Mock Spark writes |
 | `transform/` | Unit tests | Mock SQL files, temp views |
 | `orchestration/` | Integration tests | Mock all processors |
 | `config/` | Unit tests | Test JSON files |
-| `observability/` | Unit tests | Mock Spark writes |
 | `utils/` | Unit tests | Minimal mocking |
 
 ## 11. Key Design Decisions

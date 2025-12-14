@@ -112,15 +112,16 @@
 | 9.1 | Create `job_executor.py` entry point with CLI argument parsing and pipeline dispatch | ⏳ Pending |
 | 9.2 | Create `pipelines/` package with `base_pipeline.py` and `lakeflow_curation_pipeline.py` | ⏳ Pending |
 | 9.3 | Create `core/` package with `processor.py`, `scd1_processor.py`, `scd2_processor.py`, `dedup.py` | ⏳ Pending |
-| 9.4 | Create `io/` package with `reader.py`, `writer.py`, `control_table.py` | ⏳ Pending |
-| 9.5 | Create `transform/` package with `sql_engine.py`, `hash_generator.py`, `reference_loader.py` | ⏳ Pending |
-| 9.6 | Create `orchestration/` package with `orchestrator.py`, `dependency_resolver.py`, `parallel_executor.py` | ⏳ Pending |
-| 9.7 | Create `config/` package with `loader.py`, `validator.py`, `schema.py` | ⏳ Pending |
-| 9.8 | Create `observability/` package with `logger.py`, `metrics.py`, `audit.py` | ⏳ Pending |
-| 9.9 | Create `utils/` package with `spark_utils.py`, `delta_utils.py`, `datetime_utils.py` | ⏳ Pending |
-| 9.10 | Migrate existing `silver_processor.py` logic to new modular structure | ⏳ Pending |
-| 9.11 | Update `__init__.py` with public API exports | ⏳ Pending |
-| 9.12 | Create tests mirroring new package structure | ⏳ Pending |
+| 9.4 | Create `reader/` package with `incremental_reader.py`, `control_table.py`, `bronze_reader.py` | ⏳ Pending |
+| 9.5 | Create `writer/` package with `delta_writer.py`, `merge_executor.py`, `table_manager.py` | ⏳ Pending |
+| 9.6 | Create `audit/` package with `audit_logger.py`, `metrics_collector.py`, `run_tracker.py` | ⏳ Pending |
+| 9.7 | Create `transform/` package with `sql_engine.py`, `hash_generator.py`, `reference_loader.py` | ⏳ Pending |
+| 9.8 | Create `orchestration/` package with `orchestrator.py`, `dependency_resolver.py`, `parallel_executor.py` | ⏳ Pending |
+| 9.9 | Create `config/` package with `loader.py`, `validator.py`, `schema.py` | ⏳ Pending |
+| 9.10 | Create `utils/` package with `spark_utils.py`, `delta_utils.py`, `datetime_utils.py` | ⏳ Pending |
+| 9.11 | Migrate existing `silver_processor.py` logic to new modular structure | ⏳ Pending |
+| 9.12 | Update `__init__.py` with public API exports | ⏳ Pending |
+| 9.13 | Create tests mirroring new package structure | ⏳ Pending |
 
 ## 3. File Structure (Modular Architecture)
 
@@ -167,11 +168,23 @@ curation_framework/
 │       │   ├── scd2_processor.py     # SCD Type 2 hash-based merge
 │       │   └── dedup.py              # Entity-level deduplication
 │       │
-│       ├── io/                       # Input/Output Modules
+│       ├── reader/                   # Source Reading Modules
 │       │   ├── __init__.py
-│       │   ├── reader.py             # Incremental source reader
-│       │   ├── writer.py             # Delta table writer
-│       │   └── control_table.py      # Watermark control table manager
+│       │   ├── incremental_reader.py # Watermark + lookback read
+│       │   ├── control_table.py      # Watermark control table
+│       │   └── bronze_reader.py      # Bronze-specific utilities
+│       │
+│       ├── writer/                   # Target Writing Modules
+│       │   ├── __init__.py
+│       │   ├── delta_writer.py       # Delta table write operations
+│       │   ├── merge_executor.py     # SCD merge execution
+│       │   └── table_manager.py      # Table creation, schema evolution
+│       │
+│       ├── audit/                    # Audit & Observability Modules
+│       │   ├── __init__.py
+│       │   ├── audit_logger.py       # Audit log table writer
+│       │   ├── metrics_collector.py  # Processing metrics
+│       │   └── run_tracker.py        # Run ID and status tracking
 │       │
 │       ├── transform/                # Transformation Modules
 │       │   ├── __init__.py
@@ -191,12 +204,6 @@ curation_framework/
 │       │   ├── validator.py          # Schema validation
 │       │   └── schema.py             # Dataclass schemas
 │       │
-│       ├── observability/            # Monitoring & Logging
-│       │   ├── __init__.py
-│       │   ├── logger.py             # Structured logging
-│       │   ├── metrics.py            # Processing metrics
-│       │   └── audit.py              # Audit log writer
-│       │
 │       └── utils/                    # Shared Utilities
 │           ├── __init__.py
 │           ├── spark_utils.py        # SparkSession helpers
@@ -209,9 +216,14 @@ curation_framework/
     │   ├── test_scd1_processor.py
     │   ├── test_scd2_processor.py
     │   └── test_dedup.py
-    ├── io/
-    │   ├── test_reader.py
+    ├── reader/
+    │   ├── test_incremental_reader.py
     │   └── test_control_table.py
+    ├── writer/
+    │   ├── test_merge_executor.py
+    │   └── test_delta_writer.py
+    ├── audit/
+    │   └── test_audit_logger.py
     ├── transform/
     │   ├── test_sql_engine.py
     │   └── test_hash_generator.py
@@ -236,17 +248,37 @@ curation_framework/
 | `scd2_processor.py` | `SCD2Processor` | Hash-based history tracking with `_pk_hash`, `_diff_hash` |
 | `dedup.py` | `deduplicate_entity()` | Entity-level dedup on `(business_key, source_system)` |
 
-### 4.2 I/O Layer (`io/`)
+### 4.2 Reader Layer (`reader/`)
 
-**Purpose:** Handles all data input/output operations.
+**Purpose:** Handles source data reading and watermark management.
 
 | Module | Class/Function | Description |
 |--------|----------------|-------------|
-| `reader.py` | `IncrementalReader` | Reads Bronze with watermark filter + lookback |
-| `writer.py` | `DeltaWriter` | Writes to Silver Delta tables |
+| `incremental_reader.py` | `IncrementalReader` | Reads Bronze with watermark filter + lookback |
 | `control_table.py` | `ControlTableManager` | Atomic watermark updates to control table |
+| `bronze_reader.py` | `BronzeReader` | Bronze-specific read utilities |
 
-### 4.3 Transform Layer (`transform/`)
+### 4.3 Writer Layer (`writer/`)
+
+**Purpose:** Handles target data writing and table management.
+
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `delta_writer.py` | `DeltaWriter` | Writes to Silver Delta tables |
+| `merge_executor.py` | `MergeExecutor` | Executes SCD merge operations |
+| `table_manager.py` | `TableManager` | Table creation and schema evolution |
+
+### 4.4 Audit Layer (`audit/`)
+
+**Purpose:** Handles audit logging and metrics.
+
+| Module | Class/Function | Description |
+|--------|----------------|-------------|
+| `audit_logger.py` | `AuditLogger` | Writes to `curation_control.audit_log` |
+| `metrics_collector.py` | `MetricsCollector` | Processing metrics (counts, duration) |
+| `run_tracker.py` | `RunTracker` | Manages run IDs and status |
+
+### 4.5 Transform Layer (`transform/`)
 
 **Purpose:** Handles all data transformation logic.
 
@@ -256,7 +288,7 @@ curation_framework/
 | `hash_generator.py` | `generate_pk_hash()`, `generate_diff_hash()` | SHA-256 hash column generation |
 | `reference_loader.py` | `ReferenceLoader` | Registers reference tables as temp views |
 
-### 4.4 Orchestration Layer (`orchestration/`)
+### 4.6 Orchestration Layer (`orchestration/`)
 
 **Purpose:** Coordinates the end-to-end batch processing.
 
@@ -266,7 +298,7 @@ curation_framework/
 | `dependency_resolver.py` | `resolve_order()` | Topological sort based on `depends_on` |
 | `parallel_executor.py` | `ParallelExecutor` | ThreadPoolExecutor for independent tables |
 
-### 4.5 Config Layer (`config/`)
+### 4.7 Config Layer (`config/`)
 
 **Purpose:** Configuration loading and validation.
 
@@ -275,16 +307,6 @@ curation_framework/
 | `loader.py` | `load_config()` | Load JSON from workspace or local |
 | `validator.py` | `validate_config()` | Validate against schema, fail fast |
 | `schema.py` | `TableConfig`, `GlobalSettings` | Dataclass definitions |
-
-### 4.6 Observability Layer (`observability/`)
-
-**Purpose:** Logging, metrics, and audit trail.
-
-| Module | Class/Function | Description |
-|--------|----------------|-------------|
-| `logger.py` | `get_logger()` | Structured JSON logging |
-| `metrics.py` | `MetricsCollector` | Processing metrics (counts, duration) |
-| `audit.py` | `AuditLogger` | Writes to `curation_control.audit_log` |
 
 ### 4.7 Utils Layer (`utils/`)
 
