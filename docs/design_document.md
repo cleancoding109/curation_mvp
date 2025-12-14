@@ -357,10 +357,11 @@ To ensure deterministic hashing across runs and Spark versions:
 │                                     ▼                                        │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Apply SQL Transformation (from configured SQL file)                 │    │
-│  │  - Data cleansing                                                    │    │
-│  │  - Type casting                                                      │    │
+│  │  - Timezone conversion (parameterized)                               │    │
+│  │  - Reference data lookups (JOIN to ref tables)                       │    │
+│  │  - Data cleansing & type casting                                     │    │
 │  │  - Business logic                                                    │    │
-│  └──────────────────────────────────┬──────────────────────────────────┘    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                     │                                        │
 │                                     ▼                                        │
 │                    ┌────────────────┴────────────────┐                      │
@@ -392,6 +393,104 @@ To ensure deterministic hashing across runs and Spark versions:
 
 ## 5. Configuration Schema
 
+### 5.0 Parameterized SQL Transformations
+
+All transformations are implemented in **pure Spark SQL** (no Python UDFs). Parameters are injected into SQL at runtime using variable substitution.
+
+#### 5.0.1 Timezone Conversion
+
+Source data may arrive in UTC or source-system-local time. The framework supports parameterized timezone conversion.
+
+**Configuration:**
+```json
+{
+  "timezone_config": {
+    "source_timezone": "UTC",
+    "target_timezone": "America/New_York",
+    "timestamp_columns": ["event_ts", "created_at", "updated_at"]
+  }
+}
+```
+
+**SQL Pattern:**
+```sql
+SELECT
+  claim_id,
+  -- Convert from source timezone to target timezone
+  FROM_UTC_TIMESTAMP(
+    TO_UTC_TIMESTAMP(event_ts, '${source_timezone}'),
+    '${target_timezone}'
+  ) AS event_ts,
+  -- Or if source is already UTC:
+  FROM_UTC_TIMESTAMP(event_ts, '${target_timezone}') AS event_ts_local
+FROM source_incremental
+```
+
+**Supported Functions (Native Spark SQL):**
+| Function | Purpose |
+|----------|---------||
+| `TO_UTC_TIMESTAMP(ts, tz)` | Convert local time to UTC |
+| `FROM_UTC_TIMESTAMP(ts, tz)` | Convert UTC to local time |
+| `CONVERT_TIMEZONE(from_tz, to_tz, ts)` | Direct conversion (Databricks SQL) |
+
+#### 5.0.2 Reference Data Lookups
+
+Enrich source data by joining to reference/dimension tables. Reference tables are registered as temp views before transformation SQL executes.
+
+**Configuration:**
+```json
+{
+  "reference_tables": [
+    {
+      "alias": "ref_providers",
+      "table": "silver.dim_providers",
+      "filter": "is_current = true"
+    },
+    {
+      "alias": "ref_icd_codes",
+      "table": "silver.dim_icd_codes",
+      "filter": null
+    }
+  ]
+}
+```
+
+**SQL Pattern:**
+```sql
+SELECT
+  s.claim_id,
+  s.provider_id,
+  p.provider_name,
+  p.provider_npi,
+  s.diagnosis_code,
+  icd.diagnosis_description,
+  icd.diagnosis_category
+FROM source_incremental s
+LEFT JOIN ref_providers p
+  ON s.provider_id = p.provider_id
+LEFT JOIN ref_icd_codes icd
+  ON s.diagnosis_code = icd.icd_code
+```
+
+**Design Principles:**
+- **No Python UDFs**: All logic in native Spark SQL for performance and maintainability.
+- **LEFT JOIN Default**: Reference lookups use LEFT JOIN to avoid dropping records when reference data is missing.
+- **Current Records Only**: Dimension tables filtered to `is_current = true` for SCD2 dimensions.
+- **Broadcast Hint**: Small reference tables can use `/*+ BROADCAST(ref_providers) */` for performance.
+
+#### 5.0.3 SQL Variable Substitution
+
+The framework replaces `${variable_name}` placeholders in SQL files with values from configuration at runtime.
+
+**Available Variables:**
+| Variable | Source | Example |
+|----------|--------|---------||
+| `${source_timezone}` | Table config | `"UTC"` |
+| `${target_timezone}` | Table config | `"America/New_York"` |
+| `${catalog}` | Global settings | `"main"` |
+| `${schema_silver}` | Global settings | `"silver"` |
+| `${processing_date}` | Runtime | `"2024-01-15"` |
+
 ### 5.1 Table Configuration
 
 ```json
@@ -412,6 +511,18 @@ To ensure deterministic hashing across runs and Spark versions:
   },
   "track_columns": ["name", "email", "address"],
   "transformation_sql_path": "${workspace.file_path}/conf/sql/customers_transform.sql",
+  "timezone_config": {
+    "source_timezone": "UTC",
+    "target_timezone": "America/New_York",
+    "timestamp_columns": ["created_at", "updated_at"]
+  },
+  "reference_tables": [
+    {
+      "alias": "ref_states",
+      "table": "silver.dim_states",
+      "filter": null
+    }
+  ],
   "enabled": true
 }
 ```
@@ -430,6 +541,8 @@ To ensure deterministic hashing across runs and Spark versions:
   "default_dedup_order_columns": ["ingestion_ts DESC"],
   "scd2_end_date_value": "9999-12-31 23:59:59",
   "workspace_file_path": "${workspace.root_path}/files",
+  "default_source_timezone": "UTC",
+  "default_target_timezone": "America/New_York",
   "log_level": "INFO"
 }
 ```
