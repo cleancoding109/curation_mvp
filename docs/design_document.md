@@ -182,10 +182,18 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 - **Rule**: Keep the **first** record per dedup key after ordering (latest by time, stable by tiebreaker).
 - **Mandatory Step**: This reduction to one row per entity **must** occur before SCD merge.
 
-**Tiebreaker Fallback:**
-- If `_kafka_offset` is available in Bronze, use it as the primary tiebreaker.
-- If not available, configure `dedup_order_columns: ["ingestion_ts DESC"]` only.
-- When no tiebreaker exists and timestamps collide, behavior is non-deterministic but stable across reruns (same row selected).
+**Tiebreaker Configuration (Required for Determinism):**
+- **Recommended**: If `_kafka_offset` is available in Bronze, use it as the primary tiebreaker: `["ingestion_ts DESC", "_kafka_offset DESC"]`
+- **Alternative**: Use a unique monotonic column from the source system (e.g., `source_sequence_id`).
+- **Fallback**: If no tiebreaker column exists, configure `dedup_order_columns: ["ingestion_ts DESC"]` only.
+
+**⚠️ OPERATIONAL RISK - Timestamp Collision Without Tiebreaker:**
+> When no tiebreaker is configured and multiple records share the same `ingestion_ts`, the selected row is **undefined**. Spark's `ROW_NUMBER()` may return different results across:
+> - Different cluster configurations
+> - Spark version upgrades
+> - Partition changes
+>
+> **Mitigation**: Always configure a tiebreaker column. If unavailable, document this as a known limitation and monitor for duplicate keys in source data.
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -802,6 +810,38 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 6.1 Wheel Entry Point Configuration
+
+The `pyproject.toml` defines the entry point that `python_wheel_task` invokes:
+
+```toml
+# pyproject.toml
+[project]
+name = "curation_framework"
+version = "1.0.0"
+
+[project.scripts]
+# This creates the entry point for python_wheel_task
+main = "curation_framework.main:main"
+
+[project.entry-points."databricks"]
+# Alternative: use databricks-specific entry point
+main = "curation_framework.main:main"
+```
+
+**DAB Wheel Build:**
+```yaml
+# databricks.yml
+bundle:
+  name: curation_framework
+
+artifacts:
+  default:
+    type: whl
+    build: uv build
+    path: .
+```
+
 ## 7. Orchestration Strategy
 
 ### 7.1 Hierarchical Execution Model
@@ -855,44 +895,55 @@ The framework uses a **Sub-Domain Ordered** orchestration strategy where tables 
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Configuration Structure
+### 7.2 Configuration Strategy: Single Source of Truth
 
-**Sub-Domain Configuration:**
+**Principle**: Orchestration metadata (`sub_domain`, `sequence`, `critical`) is defined **only** in each `TableConfig`. There is no separate `sub_domains` configuration block.
+
+**Why Single Source?**
+- Eliminates risk of config drift between table definitions and orchestration blocks
+- Each table is self-describing: all metadata in one place
+- Validator can check completeness without cross-referencing
+
+**TableConfig Orchestration Fields:**
 ```json
 {
-  "sub_domains": [
-    {
-      "name": "party",
-      "description": "Party entities (Claimants, Providers)",
-      "load_order": 1,
-      "tables": [
-        { "table_name": "silver_claimants", "sequence": 1 },
-        { "table_name": "silver_providers", "sequence": 2 },
-        { "table_name": "silver_policies", "sequence": 3 }
-      ]
-    },
-    {
-      "name": "claims",
-      "description": "Claims processing entities",
-      "load_order": 2,
-      "tables": [
-        { "table_name": "silver_claims", "sequence": 1 },
-        { "table_name": "silver_claim_lines", "sequence": 2 },
-        { "table_name": "silver_claim_diagnoses", "sequence": 3 }
-      ]
-    },
-    {
-      "name": "financials",
-      "description": "Financial transactions",
-      "load_order": 3,
-      "tables": [
-        { "table_name": "silver_payments", "sequence": 1 },
-        { "table_name": "silver_adjustments", "sequence": 2 }
-      ]
-    }
-  ]
+  "table_name": "silver_claimants",
+  "sub_domain": "party",
+  "sequence": 1,
+  "critical": true,
+  // ... other fields
 }
 ```
+
+**Orchestration Derived at Runtime:**
+```python
+# orchestration/dependency_resolver.py
+def resolve_execution_order(tables: list[TableConfig]) -> list[list[TableConfig]]:
+    """
+    Group tables by sub_domain, sort by sequence within each group.
+    Returns: [[sub_domain_1_tables], [sub_domain_2_tables], ...]
+    """
+    # Group by sub_domain
+    by_domain = defaultdict(list)
+    for t in tables:
+        by_domain[t.sub_domain].append(t)
+    
+    # Sort each group by sequence
+    for domain in by_domain:
+        by_domain[domain].sort(key=lambda x: x.sequence)
+    
+    # Order domains by their lowest sequence number (or alphabetically)
+    domain_order = sorted(by_domain.keys())
+    return [by_domain[d] for d in domain_order]
+```
+
+**Validation Rules:**
+| Rule | Description |
+|------|-------------|
+| **Unique (sub_domain, sequence)** | No two tables in same sub_domain can have same sequence |
+| **sub_domain Required** | All enabled tables must have a sub_domain |
+| **sequence Required** | All enabled tables must have a sequence number |
+| **critical Default** | Defaults to `false` if not specified |
 
 ### 7.3 Execution Rules
 
@@ -908,6 +959,14 @@ The framework uses a **Sub-Domain Ordered** orchestration strategy where tables 
 
 ### 7.4 DAB Job Definition
 
+**Deployment Strategy: Python Wheel Task**
+
+The framework uses `python_wheel_task` as the single standard for both dev and prod environments. This provides:
+- **Versioning**: Wheel packages are versioned and immutable once published.
+- **Consistency**: Same package runs identically in all environments.
+- **Dependencies**: All Python dependencies are bundled in the wheel.
+- **No Workspace Files**: No need to sync `.py` files to workspace; wheel is uploaded to cluster.
+
 ```yaml
 # resources/curation_workflow.job.yml
 resources:
@@ -918,27 +977,35 @@ resources:
         quartz_cron_expression: "0 0 * * * ?"  # Hourly
         timezone_id: "America/New_York"
       
+      # Wheel is built and uploaded by DAB
+      python_wheel_task:
+        package_name: "curation_framework"
+        entry_point: "main"  # Calls curation_framework.main:main()
+      
       tasks:
         # Sub-Domain 1: Party
         - task_key: "party_claimants"
-          spark_python_task:
-            python_file: "${workspace.file_path}/src/pipeline.py"
+          python_wheel_task:
+            package_name: "curation_framework"
+            entry_point: "main"
             parameters:
               - "--table_name=silver_claimants"
         
         - task_key: "party_providers"
           depends_on:
             - task_key: "party_claimants"
-          spark_python_task:
-            python_file: "${workspace.file_path}/src/pipeline.py"
+          python_wheel_task:
+            package_name: "curation_framework"
+            entry_point: "main"
             parameters:
               - "--table_name=silver_providers"
         
         - task_key: "party_policies"
           depends_on:
             - task_key: "party_providers"
-          spark_python_task:
-            python_file: "${workspace.file_path}/src/pipeline.py"
+          python_wheel_task:
+            package_name: "curation_framework"
+            entry_point: "main"
             parameters:
               - "--table_name=silver_policies"
         
@@ -946,16 +1013,18 @@ resources:
         - task_key: "claims_claims"
           depends_on:
             - task_key: "party_policies"
-          spark_python_task:
-            python_file: "${workspace.file_path}/src/pipeline.py"
+          python_wheel_task:
+            package_name: "curation_framework"
+            entry_point: "main"
             parameters:
               - "--table_name=silver_claims"
         
         - task_key: "claims_claim_lines"
           depends_on:
             - task_key: "claims_claims"
-          spark_python_task:
-            python_file: "${workspace.file_path}/src/pipeline.py"
+          python_wheel_task:
+            package_name: "curation_framework"
+            entry_point: "main"
             parameters:
               - "--table_name=silver_claim_lines"
         
@@ -963,8 +1032,15 @@ resources:
         - task_key: "financials_payments"
           depends_on:
             - task_key: "claims_claim_lines"
-          spark_python_task:
-            python_file: "${workspace.file_path}/src/pipeline.py"
+          python_wheel_task:
+            package_name: "curation_framework"
+            entry_point: "main"
+            parameters:
+              - "--table_name=silver_payments"
+```
+
+**Configuration Files Deployment:**
+Configuration files (`tables_config.json`, SQL files) are deployed as workspace files via DAB `sync` section and accessed at runtime via `${workspace.file_path}`.
             parameters:
               - "--table_name=silver_payments"
 ```
@@ -1039,10 +1115,12 @@ The framework follows a **layered modular architecture** with clear separation o
 
 ### 10.1 Package Structure
 
+**Entry Point**: `curation_framework.main:main()` - invoked by `python_wheel_task` in DAB jobs.
+
 ```
 src/curation_framework/
 ├── __init__.py                    # Package exports & public API
-├── main.py                        # Entry point (CLI & Job execution)
+├── main.py                        # Wheel entry point (python_wheel_task calls this)
 │
 ├── core/                          # Core Processing Modules
 │   ├── __init__.py
@@ -1193,19 +1271,90 @@ class BatchOrchestrator:
 
 ```python
 # config/schema.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 @dataclass
+class TimezoneConfig:
+    """Timezone conversion configuration."""
+    source_timezone: str = "UTC"
+    target_timezone: str = "America/New_York"
+    timestamp_columns: list[str] = field(default_factory=list)
+
+@dataclass
+class ReferenceTable:
+    """Reference table configuration for lookups."""
+    alias: str                          # Temp view name for SQL
+    table: str                          # Fully qualified table name
+    filter: Optional[str] = None        # Optional WHERE clause
+    broadcast: bool = False             # Use broadcast hint
+    max_rows: int = 50000               # Safety limit
+
+@dataclass
+class SCD2Columns:
+    """SCD Type 2 metadata column names."""
+    effective_start_date: str = "effective_start_date"
+    effective_end_date: str = "effective_end_date"
+    is_current: str = "is_current"
+
+@dataclass
 class TableConfig:
-    table_name: str
-    source_table: str
-    target_table: str
-    scd_type: int
-    business_key_columns: list[str]
+    """Complete table configuration - single source of truth."""
+    # Identity
+    table_name: str                     # Unique identifier
+    source_table: str                   # Fully qualified Bronze table
+    target_table: str                   # Fully qualified Silver table
+    
+    # SCD Configuration
+    scd_type: int                       # 1 = Upsert, 2 = History
+    business_key_columns: list[str]     # Natural key columns
+    source_system_column: str = "source_system"
+    
+    # Orchestration (Single Source of Truth)
+    sub_domain: str = "default"         # Execution group (party, claims, etc.)
+    sequence: int = 1                   # Order within sub_domain
+    critical: bool = False              # Halt on failure if True
+    
+    # Watermark & Dedup
     watermark_column: str = "ingestion_ts"
-    critical: bool = False
+    lookback_interval: str = "2 HOURS"
+    dedup_order_columns: list[str] = field(
+        default_factory=lambda: ["ingestion_ts DESC"]
+    )
+    
+    # SCD2-Specific
+    scd2_columns: Optional[SCD2Columns] = None
+    track_columns: list[str] = field(default_factory=list)
+    
+    # Transformations
+    transformation_sql_path: Optional[str] = None
+    timezone_config: Optional[TimezoneConfig] = None
+    reference_tables: list[ReferenceTable] = field(default_factory=list)
+    
+    # Control
     enabled: bool = True
+
+@dataclass
+class GlobalSettings:
+    """Global framework settings."""
+    catalog: str = "main"
+    schema_bronze: str = "bronze"
+    schema_silver: str = "silver"
+    control_table: str = "silver.curation_control"
+    audit_table: str = "silver.curation_audit_log"
+    default_watermark_column: str = "ingestion_ts"
+    default_lookback_interval: str = "2 HOURS"
+    default_dedup_order_columns: list[str] = field(
+        default_factory=lambda: ["ingestion_ts DESC"]
+    )
+    scd2_end_date_value: str = "9999-12-31 23:59:59"
+    default_source_timezone: str = "UTC"
+    default_target_timezone: str = "America/New_York"
+    log_level: str = "INFO"
+    allowed_variables: list[str] = field(default_factory=lambda: [
+        "source_timezone", "target_timezone", "catalog",
+        "schema_silver", "processing_date"
+    ])
 ```
 
 #### 10.2.6 Observability Layer (`observability/`)
@@ -1214,7 +1363,7 @@ class TableConfig:
 |--------|---------------|
 | `logger.py` | Structured logging with JSON format for log analytics |
 | `metrics.py` | Collects processing metrics (records, duration, watermarks) |
-| `audit.py` | Writes to `curation_control.audit_log` table |
+| `audit.py` | Writes to `silver.curation_audit_log` table |
 
 **Key Design**: Observability is cross-cutting but injected, not hard-coded.
 
