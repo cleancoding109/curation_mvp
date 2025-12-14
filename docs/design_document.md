@@ -916,7 +916,7 @@ resources:
         # Sub-Domain 1: Party
         - task_key: "party_claimants"
           notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            notebook_path: "${workspace.file_path}/src/pipeline.py"
             base_parameters:
               table_name: "silver_claimants"
         
@@ -924,7 +924,7 @@ resources:
           depends_on:
             - task_key: "party_claimants"
           notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            notebook_path: "${workspace.file_path}/src/pipeline.py"
             base_parameters:
               table_name: "silver_providers"
         
@@ -932,7 +932,7 @@ resources:
           depends_on:
             - task_key: "party_providers"
           notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            notebook_path: "${workspace.file_path}/src/pipeline.py"
             base_parameters:
               table_name: "silver_policies"
         
@@ -941,7 +941,7 @@ resources:
           depends_on:
             - task_key: "party_policies"
           notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            notebook_path: "${workspace.file_path}/src/pipeline.py"
             base_parameters:
               table_name: "silver_claims"
         
@@ -949,7 +949,7 @@ resources:
           depends_on:
             - task_key: "claims_claims"
           notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            notebook_path: "${workspace.file_path}/src/pipeline.py"
             base_parameters:
               table_name: "silver_claim_lines"
         
@@ -958,7 +958,7 @@ resources:
           depends_on:
             - task_key: "claims_claim_lines"
           notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            notebook_path: "${workspace.file_path}/src/pipeline.py"
             base_parameters:
               table_name: "silver_payments"
 ```
