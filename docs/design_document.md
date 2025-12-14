@@ -675,6 +675,9 @@ WHERE _action IN ('INSERT', 'UPDATE');
   "table_name": "silver_customers",
   "source_table": "bronze.customers_streaming",
   "target_table": "silver.customers",
+  "sub_domain": "party",
+  "sequence": 1,
+  "critical": true,
   "scd_type": 2,
   "business_key_columns": ["customer_id"],
   "source_system_column": "source_system",
@@ -697,7 +700,9 @@ WHERE _action IN ('INSERT', 'UPDATE');
     {
       "alias": "ref_states",
       "table": "silver.dim_states",
-      "filter": null
+      "filter": null,
+      "broadcast": true,
+      "max_rows": 10000
     }
   ],
   "enabled": true
@@ -799,7 +804,7 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 
 ## 7. Orchestration Strategy
 
-### 8.1 Hierarchical Execution Model
+### 7.1 Hierarchical Execution Model
 
 The framework uses a **Sub-Domain Ordered** orchestration strategy where tables are loaded in a sequence that respects data model dependencies.
 
@@ -850,7 +855,7 @@ The framework uses a **Sub-Domain Ordered** orchestration strategy where tables 
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 Configuration Structure
+### 7.2 Configuration Structure
 
 **Sub-Domain Configuration:**
 ```json
@@ -889,7 +894,7 @@ The framework uses a **Sub-Domain Ordered** orchestration strategy where tables 
 }
 ```
 
-### 8.3 Execution Rules
+### 7.3 Execution Rules
 
 | Rule | Description |
 |------|-------------|
@@ -898,9 +903,10 @@ The framework uses a **Sub-Domain Ordered** orchestration strategy where tables 
 | **Pipeline Isolation** | Each pipeline loads exactly **one target table** |
 | **Dependency Wait** | Sub-domain N+1 starts only after Sub-domain N completes successfully |
 | **Parallel Within Domain** | Tables with same `sequence` can run in parallel (optional) |
-| **Failure Handling** | Table failure logs error but continues; sub-domain fails if critical table fails |
+| **Critical Table Failure** | If `critical: true` table fails, sub-domain execution halts |
+| **Non-Critical Failure** | If `critical: false` table fails, log error and continue |
 
-### 8.4 DAB Job Definition
+### 7.4 DAB Job Definition
 
 ```yaml
 # resources/curation_workflow.job.yml
@@ -915,67 +921,67 @@ resources:
       tasks:
         # Sub-Domain 1: Party
         - task_key: "party_claimants"
-          notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.py"
-            base_parameters:
-              table_name: "silver_claimants"
+          spark_python_task:
+            python_file: "${workspace.file_path}/src/pipeline.py"
+            parameters:
+              - "--table_name=silver_claimants"
         
         - task_key: "party_providers"
           depends_on:
             - task_key: "party_claimants"
-          notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.py"
-            base_parameters:
-              table_name: "silver_providers"
+          spark_python_task:
+            python_file: "${workspace.file_path}/src/pipeline.py"
+            parameters:
+              - "--table_name=silver_providers"
         
         - task_key: "party_policies"
           depends_on:
             - task_key: "party_providers"
-          notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.py"
-            base_parameters:
-              table_name: "silver_policies"
+          spark_python_task:
+            python_file: "${workspace.file_path}/src/pipeline.py"
+            parameters:
+              - "--table_name=silver_policies"
         
         # Sub-Domain 2: Claims (depends on Party completion)
         - task_key: "claims_claims"
           depends_on:
             - task_key: "party_policies"
-          notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.py"
-            base_parameters:
-              table_name: "silver_claims"
+          spark_python_task:
+            python_file: "${workspace.file_path}/src/pipeline.py"
+            parameters:
+              - "--table_name=silver_claims"
         
         - task_key: "claims_claim_lines"
           depends_on:
             - task_key: "claims_claims"
-          notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.py"
-            base_parameters:
-              table_name: "silver_claim_lines"
+          spark_python_task:
+            python_file: "${workspace.file_path}/src/pipeline.py"
+            parameters:
+              - "--table_name=silver_claim_lines"
         
         # Sub-Domain 3: Financials (depends on Claims completion)
         - task_key: "financials_payments"
           depends_on:
             - task_key: "claims_claim_lines"
-          notebook_task:
-            notebook_path: "${workspace.file_path}/src/pipeline.py"
-            base_parameters:
-              table_name: "silver_payments"
+          spark_python_task:
+            python_file: "${workspace.file_path}/src/pipeline.py"
+            parameters:
+              - "--table_name=silver_payments"
 ```
 
-### 8.5 LTC Claims Data Model Sequence
+### 7.5 LTC Claims Data Model Sequence
 
-| Sub-Domain | Sequence | Entity | Depends On | SCD Type |
-|------------|----------|--------|------------|----------|
-| Party | 1 | Claimants | - | SCD2 |
-| Party | 2 | Providers | - | SCD2 |
-| Party | 3 | Policies | Claimants | SCD2 |
-| Claims | 1 | Claims | Claimants, Policies, Providers | SCD1 |
-| Claims | 2 | Claim Lines | Claims | SCD1 |
-| Claims | 3 | Claim Diagnoses | Claims | SCD1 |
-| Claims | 4 | Assessments | Claimants | SCD2 |
-| Financials | 1 | Payments | Claims | SCD1 |
-| Financials | 2 | Adjustments | Payments | SCD1 |
+| Sub-Domain | Sequence | Entity | Depends On | SCD Type | Critical |
+|------------|----------|--------|------------|----------|----------|
+| Party | 1 | Claimants | - | SCD2 | Yes |
+| Party | 2 | Providers | - | SCD2 | Yes |
+| Party | 3 | Policies | Claimants | SCD2 | Yes |
+| Claims | 1 | Claims | Claimants, Policies, Providers | SCD1 | Yes |
+| Claims | 2 | Claim Lines | Claims | SCD1 | No |
+| Claims | 3 | Claim Diagnoses | Claims | SCD1 | No |
+| Claims | 4 | Assessments | Claimants | SCD2 | No |
+| Financials | 1 | Payments | Claims | SCD1 | Yes |
+| Financials | 2 | Adjustments | Payments | SCD1 | No |
 
 ## 8. Error Handling Strategy
 
