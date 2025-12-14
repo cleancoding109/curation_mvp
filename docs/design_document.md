@@ -209,50 +209,80 @@ SCD Type 1 maintains only the current state of records by overwriting changes.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.3 SCD Type 2 (History Tracking Pattern)
+### 3.3 SCD Type 2 Strategy (Hash-Based)
 
-SCD Type 2 maintains full history of changes.
+This framework uses a **Hash-Based SCD Type 2** approach for performance and determinism.
+
+#### 3.3.1 Hash Key Concepts
+
+Two internal hash columns are generated to simplify logic:
+
+1.  **Entity Hash (`_pk_hash`)**:
+    - **Purpose**: Uniquely identifies the entity across time. Used as the **Merge Key**.
+    - **Formula**: `MD5(CONCAT_WS('|', business_key_1, business_key_n, source_system))`
+    - **Benefit**: Replaces complex multi-column join conditions with a single string comparison.
+
+2.  **Change Hash (`_diff_hash`)**:
+    - **Purpose**: Detects if any business value has changed.
+    - **Formula**: `MD5(CONCAT_WS('|', col1, col2, col3...))` (all `track_columns`)
+    - **Benefit**: Avoids expensive column-by-column comparisons; handles nulls consistently.
+
+#### 3.3.2 Required Parameters
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `business_key_columns` | Columns defining the entity identity. | `["claim_id"]` |
+| `track_columns` | Columns to monitor for history. | `["status", "amount", "diagnosis_code"]` |
+| `scd2_columns` | Metadata columns for versioning. | `{"start": "eff_start", "end": "eff_end", "curr": "is_current"}` |
+| `source_system_col` | Column identifying data origin. | `"source_system"` |
+
+#### 3.3.3 Logic Flow Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    SCD Type 2 - History Tracking Pattern                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Target Table (Before):                                                      │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ customer_id │ name │ email    │ effective_start │ effective_end │ is_current │
-│  ├─────────────┼──────┼──────────┼─────────────────┼───────────────┼────────────┤
-│  │ 1           │ John │ old@mail │ 2024-01-01      │ 9999-12-31    │ true       │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  Incoming Change: customer_id=1, name="John Smith"                           │
-│                                                                              │
-│  Processing Steps:                                                           │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  1. Intra-Batch Deduplication: Window over (partition by key         │    │
-│  │     order by source_ts desc) to pick latest record per key.          │    │
-│  │  2. Change Detection: Compare MD5(track_columns) of source vs target.│    │
-│  │  3. Close old record: UPDATE effective_end, is_current=false         │    │
-│  │  4. Insert new version with is_current=true                          │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  Target Table (After):                                                       │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ customer_id │ name       │ email    │ eff_start  │ eff_end    │ is_current │
-│  ├─────────────┼────────────┼──────────┼────────────┼────────────┼────────────┤
-│  │ 1           │ John       │ old@mail │ 2024-01-01 │ 2024-01-15 │ false      │
-│  │ 1           │ John Smith │ old@mail │ 2024-01-15 │ 9999-12-31 │ true       │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────┐          ┌──────────────────────┐
+│    Incoming Batch    │          │    Target Table      │
+│ (Bronze + Lookback)  │          │   (Silver Delta)     │
+└──────────┬───────────┘          └──────────┬───────────┘
+           │                                 │
+           ▼                                 ▼
+   ┌────────────────┐               ┌────────────────┐
+   │ Generate Hashes│               │ Filter Current │
+   │ - _pk_hash     │               │ WHERE is_curr  │
+   │ - _diff_hash   │               └────────┬───────┘
+   └───────┬────────┘                        │
+           │                                 │
+           ▼                                 ▼
+   ┌─────────────────────────────────────────────────┐
+   │              FULL OUTER JOIN                    │
+   │              ON a._pk_hash = b._pk_hash         │
+   └───────────────────────┬─────────────────────────┘
+                           │
+           ┌───────────────┴────────────────┐
+           ▼                                ▼
+    [ Match Found ]                  [ No Match ]
+           │                                │
+    Check _diff_hash                        │
+           │                                ▼
+    ┌──────┴───────┐                 ┌──────────────┐
+    ▼              ▼                 │  New Entity  │
+ [Different]    [Same]               │   (INSERT)   │
+    │              │                 └──────────────┘
+    ▼              ▼
+ ┌──────┐      ┌──────┐
+ │Update│      │Ignore│
+ └──────┘      └──────┘
+    │
+    ▼
+ 1. Close Old (UPDATE target SET end = now, curr = false)
+ 2. Insert New (INSERT values ..., start = now, curr = true)
 ```
+
 **Key Design Decisions:**
-- **Composite Merge Keys**: The merge condition uses `(business_key, source_system)` to ensure history is tracked per source.
+- **Hash-Based Merging**: The merge condition uses `_pk_hash` for performance.
 - **No Surrogate Keys in Merge**: Surrogate keys are strictly forbidden in merge conditions. They are derived columns for downstream use only.
 - **Batch Granularity**: The framework captures the **latest state per batch interval** (e.g., hourly). Intermediate changes within the same hour are collapsed.
-- **Deterministic Change Detection**: Uses `md5(concat_ws(..., track_columns))` to reliably detect changes.
+- **Deterministic Change Detection**: Uses `_diff_hash` to reliably detect changes.
 
-## 4. Data Flow
 ## 4. Data Flow
 
 ```

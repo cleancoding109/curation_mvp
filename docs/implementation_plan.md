@@ -103,7 +103,7 @@
 | 8.2 | Implement Lookback Window & Deduplication Logic | ⏳ Pending |
 | 8.3 | Implement Audit Logging (Run ID, Counts, Status) | ⏳ Pending |
 | 8.4 | Update DAB config to deploy SQL/JSON as Workspace Files | ⏳ Pending |
-| 8.5 | Implement Deterministic Change Detection (MD5 hashing) | ⏳ Pending |
+| 8.5 | Implement Hash-Based SCD2 (Entity Hash & Diff Hash generation) | ⏳ Pending |
 
 ## 3. File Structure
 
