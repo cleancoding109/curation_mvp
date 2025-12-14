@@ -166,9 +166,14 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 ```
 
 **Key Features:**
-- **Lookback Window**: Mitigates risk of late-arriving data by re-scanning a safety buffer (e.g., 2 hours).
-- **Atomicity**: The Control Table is updated only *after* the Silver table merge is successfully committed.
-- **Deduplication**: Because of the lookback, the pipeline explicitly handles duplicates to ensure idempotency.
+- **Lookback Window**: Mitigates risk of late-arriving data by re-scanning a safety buffer (configurable, default 2 hours).
+- **Failure-Safe Ordering**: Merge executes **first**; watermark update executes **second**. If merge succeeds but watermark update fails, the next run reprocesses the lookback window safely.
+- **Idempotency Guarantee**: Because of the lookback + dedup, reprocessing is always safe and produces the same result.
+
+**Deduplication Specification:**
+- **Dedup Key**: `(business_key_columns, source_system, ingestion_ts)`
+- **Ordering**: `ORDER BY ingestion_ts DESC, _kafka_offset DESC` (or configured tiebreaker)
+- **Rule**: Keep the **first** record per dedup key after ordering (latest by time, stable by offset).
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -226,6 +231,18 @@ Two internal hash columns are generated to simplify logic:
     - **Purpose**: Detects if any business value has changed.
     - **Formula**: `MD5(CONCAT_WS('|', col1, col2, col3...))` (all `track_columns`)
     - **Benefit**: Avoids expensive column-by-column comparisons; handles nulls consistently.
+
+#### 3.3.4 Hash Canonicalization Rules
+
+To ensure deterministic hashing across runs and Spark versions:
+
+| Data Type | Canonicalization Rule |
+|-----------|-----------------------|
+| `NULL` | Coalesce to literal string `"__NULL__"` |
+| `STRING` | `TRIM()` to remove leading/trailing whitespace |
+| `TIMESTAMP` | Cast to `STRING` using ISO format `yyyy-MM-dd HH:mm:ss.SSSSSS` |
+| `DECIMAL` | Cast to `STRING` with fixed scale (e.g., `CAST(col AS DECIMAL(18,6))`) |
+| `BOOLEAN` | Cast to `STRING` (`"true"` / `"false"`) |
 
 #### 3.3.2 Required Parameters
 
@@ -367,15 +384,17 @@ Two internal hash columns are generated to simplify logic:
   "target_table": "silver.customers",
   "scd_type": 2,
   "business_key_columns": ["customer_id"],
+  "source_system_column": "source_system",
   "watermark_column": "ingestion_ts",
-  "target_watermark_column": "processing_timestamp",
+  "lookback_interval": "2 HOURS",
+  "dedup_order_columns": ["ingestion_ts DESC", "_kafka_offset DESC"],
   "scd2_columns": {
     "effective_start_date": "effective_start_date",
     "effective_end_date": "effective_end_date",
     "is_current": "is_current"
   },
   "track_columns": ["name", "email", "address"],
-  "transformation_sql_path": "conf/sql/customers_transform.sql",
+  "transformation_sql_path": "${workspace.file_path}/conf/sql/customers_transform.sql",
   "enabled": true
 }
 ```
@@ -387,8 +406,13 @@ Two internal hash columns are generated to simplify logic:
   "catalog": "main",
   "schema_bronze": "bronze",
   "schema_silver": "silver",
+  "control_table": "silver.curation_control",
+  "audit_table": "silver.curation_audit_log",
   "default_watermark_column": "ingestion_ts",
+  "default_lookback_interval": "2 HOURS",
+  "default_dedup_order_columns": ["ingestion_ts DESC"],
   "scd2_end_date_value": "9999-12-31 23:59:59",
+  "workspace_file_path": "/Workspace/Users/${workspace.current_user.userName}/curation_framework",
   "log_level": "INFO"
 }
 ```
@@ -414,7 +438,9 @@ Two internal hash columns are generated to simplify logic:
 │  │  - Target envs      │ ──────────▶ │  └── Workspace Files            │    │
 │  └─────────────────────┘             │      ├── conf/tables_config.json│    │
 │                                      │      └── conf/sql/*.sql         │    │
-│                                      │      (Accessed via file:/Workspace) │
+│                                      │                                 │    │
+│                                      │  Path: ${workspace.file_path}   │    │
+│                                      │  Access: file:/Workspace/...    │    │
 │                                      └─────────────────────────────────┘    │
 │                                                                              │
 │  Targets:                                                                    │
