@@ -1,16 +1,68 @@
-# Claims Daily Job - Parallel execution for Claims domain
-job_name: claims_daily
-domain: claims
-description: "Daily incremental load for Claims domain"
+# Databricks Asset Bundle Job Definition
+# Claims Daily Incremental Load - Serverless Compute
 
-execution:
-  mode: parallel
-  max_parallel: 4
-  fail_fast: true
+resources:
+  jobs:
+    claims_daily:
+      name: "claims_daily"
+      description: "Daily incremental load for Claims domain - parallel execution"
+      
+      # Serverless compute for the job
+      queue:
+        enabled: true
+      
+      # Job-level parameters
+      parameters:
+        - name: domain
+          default: claims
+        - name: execution_mode
+          default: parallel
+        - name: max_parallel
+          default: "4"
+        - name: fail_fast
+          default: "true"
 
-tables:
-  - name: customer
-    dependencies: []
-    
-  - name: claims
-    dependencies: [customer]
+      # Email notifications
+      email_notifications:
+        on_failure:
+          - data-engineering@company.com
+
+      # Schedule (daily at 6 AM UTC)
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: "UTC"
+        pause_status: PAUSED
+
+      # Tasks with dependencies
+      tasks:
+        - task_key: customer
+          description: "Load customer table to SDL"
+          python_wheel_task:
+            package_name: curation_framework
+            entry_point: job_executor
+            parameters:
+              - "--job_config=resources/job/claims/claims_daily.yml"
+              - "--table_name=customer"
+              - "--domain={{job.parameters.domain}}"
+          environment_key: default_env
+          
+        - task_key: claims
+          description: "Load claims table to SDL"
+          depends_on:
+            - task_key: customer
+          python_wheel_task:
+            package_name: curation_framework
+            entry_point: job_executor
+            parameters:
+              - "--job_config=resources/job/claims/claims_daily.yml"
+              - "--table_name=claims"
+              - "--domain={{job.parameters.domain}}"
+          environment_key: default_env
+
+      # Environment with serverless
+      environments:
+        - environment_key: default_env
+          spec:
+            client: "1"
+            dependencies:
+              - curation_framework
