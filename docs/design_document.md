@@ -154,12 +154,13 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                       │
 │                                      ▼                                       │
-│  Step 3: Process, Deduplicate & Atomic Update                                │
+│  Step 3: Process, Deduplicate & Failure-Safe Update                         │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  1. Deduplicate: Filter out records already processed (by Key + TS)  │    │
-│  │  2. Apply transformations and merge into target                      │    │
-│  │  3. COMMIT Transaction                                               │    │
-│  │  4. UPDATE silver.control_table SET watermark = new_max_ts           │    │
+│  │  1. Deduplicate: Reduce to one row per (business_key, source_system) │    │
+│  │  2. Cache/Persist prepared DataFrame (deterministic source)         │    │
+│  │  3. Apply transformations and merge into target                      │    │
+│  │  4. COMMIT Merge                                                     │    │
+│  │  5. UPDATE silver.control_table SET watermark = new_max_ts           │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -167,14 +168,24 @@ The framework uses a **Control Table** pattern with a **Lookback Window** to han
 
 **Key Features:**
 - **Lookback Window**: Mitigates risk of late-arriving data by re-scanning a safety buffer (configurable, default 2 hours).
-- **Failure-Safe Ordering**: Merge executes **first**; watermark update executes **second**. If merge succeeds but watermark update fails, the next run reprocesses the lookback window safely.
-- **Idempotency Guarantee**: Because of the lookback + dedup, reprocessing is always safe and produces the same result.
+- **Failure-Safe Ordering**: Merge executes **first**; watermark update **second**. If merge succeeds but watermark update fails, next run reprocesses safely.
+- **Idempotency Guarantee**: Lookback + entity-level dedup ensures reprocessing produces identical results.
+- **Deterministic Source**: The prepared DataFrame is cached/persisted before MERGE to prevent non-deterministic re-reads.
+
+**Watermark Definition:**
+- `watermark_after` = `MAX(ingestion_ts)` among rows successfully merged in the current batch.
+- **Monotonic Rule**: Watermark never decreases. If a batch produces a lower max, watermark is not updated.
 
 **Deduplication Specification:**
 - **Dedup Key**: `(business_key_columns, source_system)` — One row per entity per batch.
-- **Ordering**: `ORDER BY ingestion_ts DESC, _kafka_offset DESC` (or configured tiebreaker)
-- **Rule**: Keep the **first** record per dedup key after ordering (latest by time, stable by offset).
+- **Ordering**: `ORDER BY ingestion_ts DESC, <tiebreaker> DESC` (configured via `dedup_order_columns`)
+- **Rule**: Keep the **first** record per dedup key after ordering (latest by time, stable by tiebreaker).
 - **Mandatory Step**: This reduction to one row per entity **must** occur before SCD merge.
+
+**Tiebreaker Fallback:**
+- If `_kafka_offset` is available in Bronze, use it as the primary tiebreaker.
+- If not available, configure `dedup_order_columns: ["ingestion_ts DESC"]` only.
+- When no tiebreaker exists and timestamps collide, behavior is non-deterministic but stable across reruns (same row selected).
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -225,13 +236,14 @@ Two internal hash columns are generated to simplify logic:
 
 1.  **Entity Hash (`_pk_hash`)**:
     - **Purpose**: Uniquely identifies the entity across time. Used as the **Merge Key**.
-    - **Formula**: `MD5(CONCAT_WS('|', business_key_1, business_key_n, source_system))`
+    - **Formula**: `SHA2(CONCAT_WS('|', business_key_1, business_key_n, source_system), 256)`
     - **Benefit**: Replaces complex multi-column join conditions with a single string comparison.
 
 2.  **Change Hash (`_diff_hash`)**:
     - **Purpose**: Detects if any business value has changed.
-    - **Formula**: `MD5(CONCAT_WS('|', col1, col2, col3...))` (all `track_columns`)
+    - **Formula**: `SHA2(CONCAT_WS('|', col1, col2, col3...), 256)` (all `track_columns`)
     - **Benefit**: Avoids expensive column-by-column comparisons; handles nulls consistently.
+    - **Algorithm**: SHA-256 chosen over MD5 for collision resistance in regulated domains.
 
 #### 3.3.4 Hash Canonicalization Rules
 
@@ -435,6 +447,11 @@ CREATE TABLE IF NOT EXISTS silver.curation_control (
   CONSTRAINT pk_control PRIMARY KEY (table_name)
 );
 ```
+
+**Constraint Enforcement Note:**
+- Delta Lake treats PRIMARY KEY as informational (not strictly enforced like RDBMS).
+- Application-level guarantee: Use `MERGE INTO control_table` keyed by `table_name` to ensure upsert semantics.
+- Periodic validation: Schedule a check for duplicate `table_name` entries.
 
 ### 5.4 Audit Log Table Schema
 
