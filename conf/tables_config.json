@@ -2,8 +2,8 @@
   "tables": [
     {
       "table_name": "silver_claimants",
-      "source_table": "bronze.claimants_streaming",
-      "target_table": "silver.claimants",
+      "source_table": "ltc_insurance.raw_data_layer.claimants_streaming",
+      "target_table": "ltc_insurance.curated_data.claimants",
       "scd_type": 2,
       "business_key_columns": ["claimant_id"],
       "source_system_column": "source_system",
@@ -34,8 +34,8 @@
     },
     {
       "table_name": "silver_policies",
-      "source_table": "bronze.policies_streaming",
-      "target_table": "silver.policies",
+      "source_table": "ltc_insurance.raw_data_layer.policies_streaming",
+      "target_table": "ltc_insurance.curated_data.policies",
       "scd_type": 2,
       "business_key_columns": ["policy_id"],
       "source_system_column": "source_system",
@@ -62,8 +62,8 @@
     },
     {
       "table_name": "silver_claims",
-      "source_table": "bronze.claims_streaming",
-      "target_table": "silver.claims",
+      "source_table": "ltc_insurance.raw_data_layer.claims_streaming",
+      "target_table": "ltc_insurance.curated_data.claims",
       "scd_type": 1,
       "business_key_columns": ["claim_id"],
       "source_system_column": "source_system",
@@ -77,9 +77,9 @@
     }
   ],
   "global_settings": {
-    "catalog": "ltc_claims",
-    "schema_bronze": "bronze",
-    "schema_silver": "silver",
+    "catalog": "ltc_insurance",
+    "schema_bronze": "raw_data_layer",
+    "schema_silver": "curated_data",
     "default_watermark_column": "ingestion_ts",
     "default_lookback_interval": "1 HOURS",
     "default_dedup_order_columns": ["ingestion_ts DESC"],
