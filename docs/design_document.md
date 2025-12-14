@@ -2,7 +2,13 @@
 
 ## 1. Overview
 
-This document describes the architecture and design of a metadata-driven Spark Batch Framework for Databricks. The framework processes data from Bronze layer (Lakeflow Streaming Tables) to Silver layer (Delta Tables) using efficient incremental batch patterns.
+This document describes the architecture and design of a metadata-driven Spark Batch Framework for Databricks. The framework performs **Curation** - processing data from Bronze layer (Lakeflow Streaming Tables) to **Silver layer** (Delta Tables) using efficient incremental batch patterns.
+
+**Curation = Silver Layer Processing** - This framework is responsible for:
+- Cleansing and standardizing raw Bronze data
+- Applying business transformations
+- Implementing SCD (Slowly Changing Dimension) patterns
+- Producing curated, query-ready Silver tables
 
 ## 2. Architecture
 
@@ -13,27 +19,37 @@ This document describes the architecture and design of a metadata-driven Spark B
 │                           Databricks Workspace                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  ┌──────────────┐    ┌──────────────────────┐    ┌──────────────────────┐  │
-│  │    Kafka     │───▶│   Lakeflow Streaming │───▶│    Bronze Layer      │  │
-│  │   Sources    │    │       Ingestion      │    │   (Streaming Tables) │  │
-│  └──────────────┘    └──────────────────────┘    └──────────┬───────────┘  │
-│                                                              │              │
-│                                                              ▼              │
-│                      ┌───────────────────────────────────────────────────┐  │
-│                      │        Curation Framework (This Project)          │  │
-│                      │  ┌─────────────────────────────────────────────┐  │  │
-│                      │  │  1. High-Watermark Incremental Reader       │  │  │
-│                      │  │  2. SQL Transformation Engine               │  │  │
-│                      │  │  3. SCD Type 1/2 Merge Processor            │  │  │
-│                      │  └─────────────────────────────────────────────┘  │  │
-│                      └───────────────────────────────────────────────────┘  │
-│                                                              │              │
-│                                                              ▼              │
-│                      ┌──────────────────────────────────────────────────┐   │
-│                      │              Silver Layer (Delta Tables)         │   │
-│                      │    - SCD Type 1: Upsert (Current State)          │   │
-│                      │    - SCD Type 2: History Tracking                │   │
-│                      └──────────────────────────────────────────────────┘   │
+│  ┌──────────────┐    ┌──────────────────────┐    ┌──────────────────────┐   │
+│  │    Kafka     │───▶│   Lakeflow Streaming │───▶│    Bronze Layer      │   │
+│  │   Sources    │    │       Ingestion      │    │   (Streaming Tables) │   │
+│  └──────────────┘    └──────────────────────┘    └──────────┬───────────┘   │
+│                                                              │               │
+│                                                              ▼               │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │          CURATION FRAMEWORK = SILVER LAYER PROCESSING                 │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
+│  │  │  1. High-Watermark Incremental Reader (Efficient Batch Reads)   │  │  │
+│  │  │  2. SQL Transformation Engine (Cleansing & Business Logic)      │  │  │
+│  │  │  3. SCD Type 1/2 Merge Processor (Upsert & History Tracking)    │  │  │
+│  │  └─────────────────────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                              │               │
+│                                                              ▼               │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    SILVER LAYER (Curated Delta Tables)                │  │
+│  │  ┌─────────────────────────────┐  ┌─────────────────────────────────┐ │  │
+│  │  │  SCD Type 1 Tables          │  │  SCD Type 2 Tables              │ │  │
+│  │  │  - Current state only       │  │  - Full history tracking        │ │  │
+│  │  │  - Upsert pattern           │  │  - Effective dates              │ │  │
+│  │  │  - Fast lookups             │  │  - Point-in-time queries        │ │  │
+│  │  └─────────────────────────────┘  └─────────────────────────────────┘ │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                              │               │
+│                                                              ▼               │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                         GOLD LAYER (Future)                           │  │
+│  │                    Aggregations, Metrics, Reports                     │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
