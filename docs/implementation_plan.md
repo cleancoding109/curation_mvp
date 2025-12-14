@@ -1,13 +1,26 @@
-# Metadata-Driven Spark Batch Framework - Implementation Plan
+# LTC Claims Management - Curation Framework Implementation Plan
 
 ## 1. Project Overview
 
 | Attribute | Value |
 |-----------|-------|
-| Project Name | Curation Framework |
+| Project Name | LTC Claims Curation Framework |
+| Domain | Long-Term Care (LTC) Claims Management |
 | Purpose | Bronze to Silver batch processing with SCD support |
 | Technology | PySpark, Delta Lake, Databricks Asset Bundles |
 | Deployment | Databricks Workflows (Lakeflow Jobs) |
+
+### 1.1 Domain Entities
+
+| Entity | SCD Type | Description |
+|--------|----------|-------------|
+| Claimants | SCD2 | Policyholders who file LTC claims |
+| Policies | SCD2 | Insurance contracts with coverage details |
+| Claims | SCD1 | Claim submissions and status updates |
+| Claim Lines | SCD1 | Individual service lines within claims |
+| Providers | SCD2 | Care facilities and service providers |
+| Payments | SCD1 | Benefit disbursements |
+| Assessments | SCD2 | Care needs evaluations |
 
 ## 2. Implementation Phases
 
@@ -24,14 +37,18 @@
 | 1.7 | SQL transformation engine | ✅ Complete |
 | 1.8 | BatchFrameworkOrchestrator class | ✅ Complete |
 
-### Phase 2: Configuration & SQL Templates ✅
+### Phase 2: LTC Domain Configuration ✅
 
 | Task | Description | Status |
 |------|-------------|--------|
-| 2.1 | tables_config.json with sample tables | ✅ Complete |
-| 2.2 | Orders transformation SQL (SCD1) | ✅ Complete |
-| 2.3 | Customers transformation SQL (SCD2) | ✅ Complete |
-| 2.4 | Products transformation SQL (SCD2) | ✅ Complete |
+| 2.1 | tables_config.json with LTC entities | ✅ Complete |
+| 2.2 | Claimants transformation SQL (SCD2) | ✅ Complete |
+| 2.3 | Policies transformation SQL (SCD2) | ✅ Complete |
+| 2.4 | Claims transformation SQL (SCD1) | ✅ Complete |
+| 2.5 | Providers transformation SQL (SCD2) | ✅ Complete |
+| 2.6 | Claim Lines transformation SQL (SCD1) | ✅ Complete |
+| 2.7 | Payments transformation SQL (SCD1) | ✅ Complete |
+| 2.8 | Assessments transformation SQL (SCD2) | ✅ Complete |
 
 ### Phase 3: DAB Deployment Configuration ✅
 
@@ -78,11 +95,15 @@ curation_framework/
 ├── README.md                         # Project readme
 │
 ├── conf/                             # Configuration files
-│   ├── tables_config.json            # Table metadata definitions
+│   ├── tables_config.json            # LTC table metadata definitions
 │   └── sql/                          # SQL transformation files
-│       ├── orders_transform.sql      # Orders (SCD1)
-│       ├── customers_transform.sql   # Customers (SCD2)
-│       └── products_transform.sql    # Products (SCD2)
+│       ├── claimants_transform.sql   # Claimants (SCD2)
+│       ├── policies_transform.sql    # Policies (SCD2)
+│       ├── claims_transform.sql      # Claims (SCD1)
+│       ├── providers_transform.sql   # Providers (SCD2)
+│       ├── claim_lines_transform.sql # Claim Lines (SCD1)
+│       ├── payments_transform.sql    # Payments (SCD1)
+│       └── assessments_transform.sql # Assessments (SCD2)
 │
 ├── docs/                             # Documentation
 │   ├── design_document.md            # Architecture & design
@@ -221,7 +242,7 @@ uv run pytest --cov=curation_framework
 
 | Setting | Value |
 |---------|-------|
-| Name | curation_framework_silver_batch_job |
+| Name | ltc_claims_silver_batch_job |
 | Schedule | Every 1 hour |
 | Timeout | 2 hours |
 | Retries | 2 |
@@ -231,7 +252,7 @@ uv run pytest --cov=curation_framework
 
 | Setting | Value |
 |---------|-------|
-| Name | curation_framework_single_table_job |
+| Name | ltc_claims_single_table_job |
 | Schedule | Manual trigger only |
 | Timeout | 1 hour |
 | Parameters | config_path, table_name |
@@ -324,15 +345,40 @@ logging.getLogger("SilverProcessor").setLevel(logging.DEBUG)
 
 | Enhancement | Priority | Description |
 |-------------|----------|-------------|
+| Data quality checks | High | Claim validation rules (e.g., service dates, amounts) |
+| Claims analytics Gold layer | High | Aggregated metrics for claims processing |
 | Schema evolution | Medium | Auto-detect and handle schema changes |
-| Data quality checks | High | Add validation rules before merge |
-| Parallel processing | Medium | Process multiple tables concurrently |
+| Parallel processing | Medium | Process multiple LTC tables concurrently |
+| Provider network validation | Medium | Verify provider eligibility and network status |
+| Metrics dashboard | Medium | Claims processing KPIs in Databricks SQL |
+| Audit trail | Medium | Track all claim status changes |
 | CDC support | Low | Support for Change Data Capture patterns |
-| Metrics dashboard | Medium | Integration with Databricks SQL dashboards |
-| Retry logic | Medium | Per-record error handling and retry |
 
-## 12. Version History
+## 12. LTC Domain-Specific Considerations
+
+### Business Rules
+
+| Rule | Description |
+|------|-------------|
+| Claim-Policy Link | Every claim must reference a valid policy |
+| Elimination Period | Benefits start after elimination period expires |
+| Daily Benefit Cap | Payments cannot exceed daily benefit amount |
+| Benefit Period | Track remaining benefit days per claimant |
+| Provider Eligibility | Verify provider is in-network and licensed |
+
+### Key Metrics (Gold Layer - Future)
+
+| Metric | Description |
+|--------|-------------|
+| Claims Submitted | Count of new claims per period |
+| Average Days to Decision | Time from submission to approval/denial |
+| Approval Rate | Percentage of claims approved |
+| Denial Reasons | Distribution of denial reason codes |
+| Average Claim Amount | Mean claim value by care setting |
+| Provider Utilization | Claims volume by provider type |
+
+## 13. Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 0.0.1 | 2024-01-15 | Initial implementation |
+| 0.0.1 | 2024-12-14 | Initial implementation for LTC Claims domain |

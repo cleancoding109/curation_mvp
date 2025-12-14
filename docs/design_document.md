@@ -2,19 +2,29 @@
 
 ## 1. Overview
 
-This document describes the architecture and design of a metadata-driven Spark Batch Framework for Databricks. The framework performs **Curation** - processing data from Bronze layer (Lakeflow Streaming Tables) to **Silver layer** (Delta Tables) using efficient incremental batch patterns.
+This document describes the architecture and design of a metadata-driven Spark Batch Framework for Databricks, built for the **Long-Term Care (LTC) Claims Management** domain. The framework performs **Curation** - processing data from Bronze layer (Lakeflow Streaming Tables) to **Silver layer** (Delta Tables) using efficient incremental batch patterns.
+
+### 1.1 Domain Context: LTC Claims Management
+
+Long-Term Care (LTC) insurance covers services for individuals who need extended assistance with daily living activities. The claims management process involves:
+- **Claimants**: Policyholders who file claims for LTC services
+- **Claims**: Requests for reimbursement of covered LTC expenses
+- **Providers**: Facilities and caregivers providing LTC services (nursing homes, home health aides, assisted living)
+- **Policies**: Insurance contracts defining coverage, benefits, and eligibility
+- **Assessments**: Evaluations of claimant care needs and eligibility
+- **Payments**: Benefit disbursements to claimants or providers
 
 **Curation = Silver Layer Processing** - This framework is responsible for:
-- Cleansing and standardizing raw Bronze data
-- Applying business transformations
-- Implementing SCD (Slowly Changing Dimension) patterns
-- Producing curated, query-ready Silver tables
+- Cleansing and standardizing raw Bronze data from claims systems
+- Applying business transformations for LTC domain entities
+- Implementing SCD (Slowly Changing Dimension) patterns for claim/policy history
+- Producing curated, query-ready Silver tables for claims analytics
 
 **Silver Layer = Relational Model (ODS Pattern)**
 - Follows a normalized/relational data model similar to an Operational Data Store (ODS)
-- Entity-centric tables (Customers, Orders, Products, etc.)
-- Maintains referential integrity between entities
-- Serves as the "single source of truth" for cleansed, conformed data
+- Entity-centric tables (Claimants, Claims, Providers, Policies, Payments, etc.)
+- Maintains referential integrity between LTC entities
+- Serves as the "single source of truth" for cleansed, conformed claims data
 - Optimized for operational reporting and downstream Gold layer aggregations
 
 ## 2. Architecture
@@ -52,8 +62,8 @@ This document describes the architecture and design of a metadata-driven Spark B
 │  │  │  - Fast lookups             │  │  - Point-in-time queries        │ │  │
 │  │  └─────────────────────────────┘  └─────────────────────────────────┘ │  │
 │  │                                                                        │  │
-│  │  Entity Tables: Customers, Orders, Products, Suppliers, etc.          │  │
-│  │  Referential Integrity: Foreign key relationships maintained          │  │
+│  │  LTC Entity Tables: Claimants, Claims, Providers, Policies, Payments  │  │
+│  │  Referential Integrity: Claim→Claimant→Policy relationships           │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                              │               │
 │                                                              ▼               │
