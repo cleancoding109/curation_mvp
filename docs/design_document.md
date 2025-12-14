@@ -491,6 +491,183 @@ The framework replaces `${variable_name}` placeholders in SQL files with values 
 | `${schema_silver}` | Global settings | `"silver"` |
 | `${processing_date}` | Runtime | `"2024-01-15"` |
 
+#### 5.0.4 Complete Transformation Example
+
+This section demonstrates a complete end-to-end transformation for the `Claims` entity.
+
+**Step 1: Base Source Query (Before Enrichment)**
+
+```sql
+-- conf/sql/claims_transform_base.sql
+-- Raw query without parameterization
+SELECT
+  claim_id,
+  claimant_id,
+  provider_id,
+  policy_id,
+  diagnosis_code,
+  claim_amount,
+  claim_status,
+  service_date,
+  submitted_at,
+  source_system,
+  ingestion_ts
+FROM source_incremental
+```
+
+**Step 2: Enriched Query with All Transformation Parameters**
+
+```sql
+-- conf/sql/claims_transform.sql
+-- Full transformation with timezone, reference data, and SCD2 preparation
+
+WITH deduplicated AS (
+  -- Step 1: Intra-batch deduplication (one row per entity per batch)
+  SELECT *
+  FROM (
+    SELECT 
+      *,
+      ROW_NUMBER() OVER (
+        PARTITION BY claim_id, source_system 
+        ORDER BY ingestion_ts DESC
+      ) AS _row_num
+    FROM source_incremental
+  )
+  WHERE _row_num = 1
+),
+
+transformed AS (
+  SELECT
+    -- Business Keys
+    s.claim_id,
+    s.source_system,
+    
+    -- Foreign Keys
+    s.claimant_id,
+    s.provider_id,
+    s.policy_id,
+    
+    -- Timezone Conversion: UTC -> Target Timezone
+    FROM_UTC_TIMESTAMP(s.service_date, '${target_timezone}') AS service_date,
+    FROM_UTC_TIMESTAMP(s.submitted_at, '${target_timezone}') AS submitted_at,
+    
+    -- Reference Data Enrichment: Provider
+    p.provider_name,
+    p.provider_npi,
+    p.provider_type,
+    
+    -- Reference Data Enrichment: ICD Codes
+    s.diagnosis_code,
+    icd.diagnosis_description,
+    icd.diagnosis_category,
+    icd.is_chronic,
+    
+    -- Reference Data Enrichment: Claim Status
+    s.claim_status AS claim_status_code,
+    cs.status_description AS claim_status_desc,
+    
+    -- Business Logic: Computed Fields
+    s.claim_amount,
+    CASE 
+      WHEN s.claim_amount > 10000 THEN 'HIGH'
+      WHEN s.claim_amount > 1000 THEN 'MEDIUM'
+      ELSE 'LOW'
+    END AS claim_tier,
+    
+    -- Data Quality: Cleansing
+    TRIM(UPPER(s.claim_status)) AS claim_status_clean,
+    COALESCE(s.claim_amount, 0) AS claim_amount_safe,
+    
+    -- Hash Keys for SCD2
+    SHA2(CONCAT_WS('|', 
+      COALESCE(CAST(s.claim_id AS STRING), '__NULL__'),
+      COALESCE(s.source_system, '__NULL__')
+    ), 256) AS _pk_hash,
+    
+    SHA2(CONCAT_WS('|',
+      COALESCE(s.claim_status, '__NULL__'),
+      COALESCE(CAST(s.claim_amount AS STRING), '__NULL__'),
+      COALESCE(s.diagnosis_code, '__NULL__'),
+      COALESCE(CAST(s.provider_id AS STRING), '__NULL__')
+    ), 256) AS _diff_hash,
+    
+    -- Metadata
+    s.ingestion_ts,
+    CURRENT_TIMESTAMP() AS processing_timestamp
+    
+  FROM deduplicated s
+  
+  -- Reference Data JOINs
+  LEFT JOIN /*+ BROADCAST(ref_providers) */ ref_providers p
+    ON s.provider_id = p.provider_id
+    AND p.is_current = true
+    
+  LEFT JOIN /*+ BROADCAST(ref_icd_codes) */ ref_icd_codes icd
+    ON s.diagnosis_code = icd.icd_code
+    
+  LEFT JOIN /*+ BROADCAST(ref_claim_status) */ ref_claim_status cs
+    ON TRIM(UPPER(s.claim_status)) = cs.status_code
+)
+
+SELECT * FROM transformed
+```
+
+**Step 3: How SCD Type 2 Uses This Query**
+
+The framework takes the output of the transformation SQL and applies SCD2 logic:
+
+```sql
+-- Framework-generated SCD2 MERGE (not user-written)
+-- This shows conceptually how the transformed data feeds into SCD2
+
+-- 1. Get current records from target (semi-join optimized)
+CREATE OR REPLACE TEMP VIEW target_current AS
+SELECT * FROM ${target_table}
+WHERE is_current = true
+  AND _pk_hash IN (SELECT _pk_hash FROM transformed_cached);
+
+-- 2. Identify changes by comparing _diff_hash
+CREATE OR REPLACE TEMP VIEW changes AS
+SELECT 
+  src.*,
+  CASE 
+    WHEN tgt._pk_hash IS NULL THEN 'INSERT'           -- New entity
+    WHEN src._diff_hash != tgt._diff_hash THEN 'UPDATE' -- Changed
+    ELSE 'NO_CHANGE'
+  END AS _action
+FROM transformed_cached src
+LEFT JOIN target_current tgt
+  ON src._pk_hash = tgt._pk_hash;
+
+-- 3. Close old versions (UPDATE)
+MERGE INTO ${target_table} AS tgt
+USING (SELECT * FROM changes WHERE _action = 'UPDATE') AS src
+ON tgt._pk_hash = src._pk_hash AND tgt.is_current = true
+WHEN MATCHED THEN UPDATE SET
+  tgt.effective_end_date = CURRENT_TIMESTAMP(),
+  tgt.is_current = false;
+
+-- 4. Insert new versions
+INSERT INTO ${target_table}
+SELECT 
+  *,
+  CURRENT_TIMESTAMP() AS effective_start_date,
+  CAST('9999-12-31 23:59:59' AS TIMESTAMP) AS effective_end_date,
+  true AS is_current
+FROM changes
+WHERE _action IN ('INSERT', 'UPDATE');
+```
+
+**Transformation Parameter Summary:**
+
+| Parameter Type | Example in Query | Config Source |
+|----------------|------------------|---------------|
+| Timezone | `FROM_UTC_TIMESTAMP(..., '${target_timezone}')` | `timezone_config` |
+| Reference Table | `LEFT JOIN ref_providers` | `reference_tables` |
+| Hash Algorithm | `SHA2(..., 256)` | Framework default |
+| Dedup Logic | `ROW_NUMBER() OVER (PARTITION BY ...)` | `dedup_order_columns` |
+| Track Columns | Included in `_diff_hash` | `track_columns` |
+
 ### 5.1 Table Configuration
 
 ```json
@@ -658,7 +835,7 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 8. Technology Stack
+## 10. Technology Stack
 
 | Component | Technology |
 |-----------|------------|
@@ -671,7 +848,7 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 | Package Management | UV (Python) |
 | Testing | pytest + Databricks Connect |
 
-## 9. Key Design Decisions
+## 11. Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
