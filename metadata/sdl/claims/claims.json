@@ -9,6 +9,7 @@
     "schema": "standardized_data_layer",
     "table": "claims"
   },
+  "source_timezone": "America/New_York",
   "load_strategy": {
     "type": "scd2",
     "business_keys": ["claim_id"],

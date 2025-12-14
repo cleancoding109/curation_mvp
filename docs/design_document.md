@@ -242,6 +242,7 @@ The framework enforces a clear separation of concerns between **infrastructure**
 | `{{alias:column}}` | Column from reference | `{alias}.{column}` |
 | `{{_pk_hash}}` | Entity hash (merge key) | Generated SHA2 expression from `hash_keys._pk_hash.columns` |
 | `{{_diff_hash}}` | Change hash (SCD2) | Generated SHA2 expression from `hash_keys._diff_hash.track_columns` |
+| `{{source_timezone}}` | Source data timezone | Value from `source_timezone` in metadata (e.g., `America/New_York`) |
 
 **Contract: Developer SQL Template Must:**
 - Use `{{source}}` placeholder (NOT hardcoded table names)
@@ -266,7 +267,8 @@ SELECT
   src.adjuster_id,
   {{adj:adjuster_name}} AS adjuster_name,
   {{adj:adjuster_region}} AS adjuster_region,
-  to_utc_timestamp(src.event_timestamp, 'America/New_York') AS event_at_utc,
+  -- Timezone: Convert from source timezone (from metadata) to UTC
+  to_utc_timestamp(src.event_timestamp, '{{source_timezone}}') AS event_timestamp_utc,
   src.source_system,
   coalesce(src.deleted_ind, false) AS deleted_ind,
   src.effective_start_date,
@@ -724,6 +726,7 @@ SQL templates use placeholder syntax for framework-managed elements. All transfo
 | `{{alias:column}}` | Reference column | `adj.adjuster_name` |
 | `{{_pk_hash}}` | Entity hash expression | `SHA2(CONCAT_WS('|', ...), 256) AS _pk_hash` |
 | `{{_diff_hash}}` | Change hash expression | `SHA2(CONCAT_WS('|', ...), 256) AS _diff_hash` |
+| `{{source_timezone}}` | Source data timezone | `America/New_York` |
 
 #### 5.4.2 Complete SQL Template Example
 
@@ -745,7 +748,8 @@ SELECT
   src.denial_reason,
   src.claim_amount AS requested_amount,
   src.approved_amount,
-  to_utc_timestamp(src.event_timestamp, 'America/New_York') AS event_at_utc,
+  -- Timezone: Convert from source timezone (from metadata) to UTC
+  to_utc_timestamp(src.event_timestamp, '{{source_timezone}}') AS event_timestamp_utc,
   src.source_system,
   coalesce(src.deleted_ind, false) AS deleted_ind,
   src.effective_start_date,
@@ -757,16 +761,17 @@ LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
 
 #### 5.4.3 Timezone Conversion
 
-Source data may arrive in UTC or source-system-local time. The framework supports parameterized timezone conversion.
+Source data arrives in a configurable timezone (specified in metadata). The target SDL layer stores all timestamps in UTC for consistency.
 
-**Configuration:**
+**Timezone Convention:**
+- **Source Timezone**: Configured per table in metadata JSON (e.g., `America/New_York`)
+- **Target Timezone**: UTC - standard for data lake storage
+- **Placeholder**: `{{source_timezone}}` - resolved at runtime from metadata
+
+**Metadata Configuration:**
 ```json
 {
-  "timezone_config": {
-    "source_timezone": "UTC",
-    "target_timezone": "America/New_York",
-    "timestamp_columns": ["event_ts", "created_at", "updated_at"]
-  }
+  "source_timezone": "America/New_York"
 }
 ```
 
@@ -774,14 +779,9 @@ Source data may arrive in UTC or source-system-local time. The framework support
 ```sql
 SELECT
   claim_id,
-  -- Convert from source timezone to target timezone
-  FROM_UTC_TIMESTAMP(
-    TO_UTC_TIMESTAMP(event_ts, '${source_timezone}'),
-    '${target_timezone}'
-  ) AS event_ts,
-  -- Or if source is already UTC:
-  FROM_UTC_TIMESTAMP(event_ts, '${target_timezone}') AS event_ts_local
-FROM source_incremental
+  -- Timezone: Convert from source timezone (from metadata) to UTC
+  to_utc_timestamp(event_ts, '{{source_timezone}}') AS event_ts_utc
+FROM {{source}} src
 ```
 
 **Supported Functions (Native Spark SQL):**

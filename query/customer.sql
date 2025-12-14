@@ -11,7 +11,8 @@ SELECT
   {{st:region}} AS region,
   src.zip_code AS postal_code,
   src.status AS customer_status,
-  to_utc_timestamp(src.last_login, 'America/New_York') AS last_login_at_utc,
+  -- Timezone: Convert from source timezone (from metadata) to UTC
+  to_utc_timestamp(src.last_login, '{{source_timezone}}') AS last_login_utc,
   src.session_count,
   src.page_views,
   src.source_system,

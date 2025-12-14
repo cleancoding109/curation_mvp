@@ -14,7 +14,8 @@ SELECT
   src.denial_reason,
   src.claim_amount AS requested_amount,
   src.approved_amount,
-  to_utc_timestamp(src.event_timestamp, 'America/New_York') AS event_at_utc,
+  -- Timezone: Convert from source timezone (from metadata) to UTC
+  to_utc_timestamp(src.event_timestamp, '{{source_timezone}}') AS event_timestamp_utc,
   src.source_system,
   coalesce(src.deleted_ind, false) AS deleted_ind,
   src.effective_start_date,
