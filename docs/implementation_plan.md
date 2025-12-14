@@ -99,10 +99,11 @@
 
 | Task | Description | Status |
 |------|-------------|--------|
-| 8.1 | Implement Watermark Control Table (replace target-based watermark) | ⏳ Pending |
-| 8.2 | Add Intra-Batch Deduplication (Window functions) to SCD2 logic | ⏳ Pending |
-| 8.3 | Implement Deterministic Change Detection (MD5 hashing) | ⏳ Pending |
+| 8.1 | Implement Watermark Control Table with Atomic Updates | ⏳ Pending |
+| 8.2 | Implement Lookback Window & Deduplication Logic | ⏳ Pending |
+| 8.3 | Implement Audit Logging (Run ID, Counts, Status) | ⏳ Pending |
 | 8.4 | Update DAB config to deploy SQL/JSON as Workspace Files | ⏳ Pending |
+| 8.5 | Implement Deterministic Change Detection (MD5 hashing) | ⏳ Pending |
 
 ## 3. File Structure
 

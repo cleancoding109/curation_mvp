@@ -24,7 +24,7 @@ Long-Term Care (LTC) insurance covers services for individuals who need extended
 - Follows a normalized/relational data model similar to an Operational Data Store (ODS)
 - Entity-centric tables (Claimants, Claims, Providers, Policies, Payments, etc.)
 - **Multi-Source Grain**: Tables retain `source_system` to distinguish data origin.
-- Maintains referential integrity between LTC entities
+- **Logical Relationships**: Models relationships between LTC entities (Referential integrity is not enforced at load time).
 - Optimized for operational reporting and downstream Gold layer aggregations
 
 ### 1.2 Upstream Integration: Unified Bronze Layer
@@ -132,7 +132,7 @@ The Silver layer maintains the distinction between data sources, effectively ope
 
 ### 3.1 High-Watermark Incremental Processing
 
-The framework uses a **Control Table** pattern to track the high watermark of the *source* data, ensuring no data loss even with late-arriving records.
+The framework uses a **Control Table** pattern with a **Lookback Window** to handle late-arriving data and ensure robustness.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -147,27 +147,28 @@ The framework uses a **Control Table** pattern to track the high watermark of th
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                       │
 │                                      ▼                                       │
-│  Step 2: Filter Source Table                                                 │
+│  Step 2: Filter Source Table with Lookback                                   │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  SELECT * FROM bronze.streaming_table                                │    │
-│  │  WHERE ingestion_ts > '2024-01-15 10:30:00'                          │    │
+│  │  WHERE ingestion_ts > ('2024-01-15 10:30:00' - INTERVAL 2 HOURS)     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                       │
 │                                      ▼                                       │
-│  Step 3: Process & Update Watermark                                          │
+│  Step 3: Process, Deduplicate & Atomic Update                                │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  1. Calculate max(ingestion_ts) from CURRENT BATCH                   │    │
+│  │  1. Deduplicate: Filter out records already processed (by Key + TS)  │    │
 │  │  2. Apply transformations and merge into target                      │    │
-│  │  3. UPDATE silver.control_table SET watermark_value = new_max_ts     │    │
+│  │  3. COMMIT Transaction                                               │    │
+│  │  4. UPDATE silver.control_table SET watermark = new_max_ts           │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Benefits:**
-- **Correctness**: Compares "apples to apples" (Source TS vs Source TS).
-- **Replayability**: Can reset the control table to reprocess data.
-- **Resilience**: Decouples job execution time from data arrival time.
+**Key Features:**
+- **Lookback Window**: Mitigates risk of late-arriving data by re-scanning a safety buffer (e.g., 2 hours).
+- **Atomicity**: The Control Table is updated only *after* the Silver table merge is successfully committed.
+- **Deduplication**: Because of the lookback, the pipeline explicitly handles duplicates to ensure idempotency.
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -245,13 +246,13 @@ SCD Type 2 maintains full history of changes.
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-
 **Key Design Decisions:**
 - **Composite Merge Keys**: The merge condition uses `(business_key, source_system)` to ensure history is tracked per source.
-- **Surrogate Keys (Optional)**: If generated, they are for downstream modeling only, not for the merge logic.
+- **No Surrogate Keys in Merge**: Surrogate keys are strictly forbidden in merge conditions. They are derived columns for downstream use only.
+- **Batch Granularity**: The framework captures the **latest state per batch interval** (e.g., hourly). Intermediate changes within the same hour are collapsed.
 - **Deterministic Change Detection**: Uses `md5(concat_ws(..., track_columns))` to reliably detect changes.
-- **Intra-Batch Deduplication**: Ensures only the latest state of an entity (per source) is applied if multiple updates arrive in one batch.
 
+## 4. Data Flow
 ## 4. Data Flow
 
 ```
@@ -383,6 +384,7 @@ SCD Type 2 maintains full history of changes.
 │  │  - Target envs      │ ──────────▶ │  └── Workspace Files            │    │
 │  └─────────────────────┘             │      ├── conf/tables_config.json│    │
 │                                      │      └── conf/sql/*.sql         │    │
+│                                      │      (Accessed via file:/Workspace) │
 │                                      └─────────────────────────────────┘    │
 │                                                                              │
 │  Targets:                                                                    │
@@ -411,13 +413,13 @@ SCD Type 2 maintains full history of changes.
 │  │                    │                   │                             │    │
 │  │               Success              Exception                         │    │
 │  │                    │                   │                             │    │
-│  │                    ▼                   ▼                             │    │
 │  │  ┌─────────────────────┐  ┌─────────────────────────────────────┐   │    │
 │  │  │ Log success         │  │ Log error with details              │   │    │
-│  │  │ Record metrics      │  │ Mark table as failed                │   │    │
-│  │  │ Continue to next    │  │ Continue to next table              │   │    │
+│  │  │ Update Control Tbl  │  │ Mark table as failed                │   │    │
+│  │  │ Insert Audit Log    │  │ Insert Audit Log (Failed)           │   │    │
 │  │  └─────────────────────┘  │ (Isolation - don't fail entire job) │   │    │
 │  │                           └─────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                       │
 │                                      ▼                                       │
