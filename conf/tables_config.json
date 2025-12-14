@@ -6,14 +6,28 @@
       "target_table": "silver.claimants",
       "scd_type": 2,
       "business_key_columns": ["claimant_id"],
+      "source_system_column": "source_system",
       "watermark_column": "ingestion_ts",
       "target_watermark_column": "processing_timestamp",
+      "lookback_interval": "1 HOURS",
+      "dedup_order_columns": ["ingestion_ts DESC", "_kafka_offset DESC"],
       "scd2_columns": {
         "effective_start_date": "effective_start_date",
         "effective_end_date": "effective_end_date",
         "is_current": "is_current"
       },
-      "track_columns": ["first_name", "last_name", "date_of_birth", "address", "city", "state", "zip_code", "phone", "email", "care_level"],
+      "track_columns": [
+        "first_name",
+        "last_name",
+        "date_of_birth",
+        "address",
+        "city",
+        "state",
+        "zip_code",
+        "phone",
+        "email",
+        "care_level"
+      ],
       "transformation_sql_path": "conf/sql/claimants_transform.sql",
       "enabled": true,
       "description": "LTC Claimants (Policyholders) with SCD Type 2 for demographic history"
@@ -24,14 +38,24 @@
       "target_table": "silver.policies",
       "scd_type": 2,
       "business_key_columns": ["policy_id"],
+      "source_system_column": "source_system",
       "watermark_column": "ingestion_ts",
       "target_watermark_column": "processing_timestamp",
+      "lookback_interval": "1 HOURS",
+      "dedup_order_columns": ["ingestion_ts DESC", "_kafka_offset DESC"],
       "scd2_columns": {
         "effective_start_date": "effective_start_date",
         "effective_end_date": "effective_end_date",
         "is_current": "is_current"
       },
-      "track_columns": ["policy_status", "coverage_type", "daily_benefit_amount", "benefit_period", "elimination_period", "premium_amount"],
+      "track_columns": [
+        "policy_status",
+        "coverage_type",
+        "daily_benefit_amount",
+        "benefit_period",
+        "elimination_period",
+        "premium_amount"
+      ],
       "transformation_sql_path": "conf/sql/policies_transform.sql",
       "enabled": true,
       "description": "LTC Insurance Policies with SCD Type 2 for coverage history"
@@ -42,71 +66,14 @@
       "target_table": "silver.claims",
       "scd_type": 1,
       "business_key_columns": ["claim_id"],
+      "source_system_column": "source_system",
       "watermark_column": "ingestion_ts",
       "target_watermark_column": "processing_timestamp",
+      "lookback_interval": "1 HOURS",
+      "dedup_order_columns": ["ingestion_ts DESC", "_kafka_offset DESC"],
       "transformation_sql_path": "conf/sql/claims_transform.sql",
       "enabled": true,
       "description": "LTC Claims with SCD Type 1 (Upsert for claim status updates)"
-    },
-    {
-      "table_name": "silver_providers",
-      "source_table": "bronze.providers_streaming",
-      "target_table": "silver.providers",
-      "scd_type": 2,
-      "business_key_columns": ["provider_id"],
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "scd2_columns": {
-        "effective_start_date": "effective_start_date",
-        "effective_end_date": "effective_end_date",
-        "is_current": "is_current"
-      },
-      "track_columns": ["provider_name", "provider_type", "license_number", "address", "city", "state", "zip_code", "accreditation_status"],
-      "transformation_sql_path": "conf/sql/providers_transform.sql",
-      "enabled": true,
-      "description": "LTC Service Providers (Nursing Homes, Home Health, Assisted Living)"
-    },
-    {
-      "table_name": "silver_claim_lines",
-      "source_table": "bronze.claim_lines_streaming",
-      "target_table": "silver.claim_lines",
-      "scd_type": 1,
-      "business_key_columns": ["claim_id", "line_number"],
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "transformation_sql_path": "conf/sql/claim_lines_transform.sql",
-      "enabled": true,
-      "description": "Individual service lines within claims (composite key)"
-    },
-    {
-      "table_name": "silver_payments",
-      "source_table": "bronze.payments_streaming",
-      "target_table": "silver.payments",
-      "scd_type": 1,
-      "business_key_columns": ["payment_id"],
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "transformation_sql_path": "conf/sql/payments_transform.sql",
-      "enabled": true,
-      "description": "Benefit payments to claimants or providers"
-    },
-    {
-      "table_name": "silver_assessments",
-      "source_table": "bronze.assessments_streaming",
-      "target_table": "silver.assessments",
-      "scd_type": 2,
-      "business_key_columns": ["assessment_id"],
-      "watermark_column": "ingestion_ts",
-      "target_watermark_column": "processing_timestamp",
-      "scd2_columns": {
-        "effective_start_date": "effective_start_date",
-        "effective_end_date": "effective_end_date",
-        "is_current": "is_current"
-      },
-      "track_columns": ["adl_score", "cognitive_score", "care_level_recommendation", "assessment_status"],
-      "transformation_sql_path": "conf/sql/assessments_transform.sql",
-      "enabled": true,
-      "description": "Care needs assessments with history tracking"
     }
   ],
   "global_settings": {
@@ -114,8 +81,12 @@
     "schema_bronze": "bronze",
     "schema_silver": "silver",
     "default_watermark_column": "ingestion_ts",
+    "default_lookback_interval": "1 HOURS",
+    "default_dedup_order_columns": ["ingestion_ts DESC"],
     "batch_timestamp_format": "yyyy-MM-dd HH:mm:ss.SSS",
     "scd2_end_date_value": "9999-12-31 23:59:59",
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "default_source_timezone": "UTC",
+    "default_target_timezone": "America/New_York"
   }
 }

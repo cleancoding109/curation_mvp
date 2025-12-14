@@ -1,0 +1,3 @@
+{"policy_id":100,"source_system":"crm","policy_status":"active","coverage_type":"ltc","daily_benefit_amount":200,"benefit_period":"3y","elimination_period":"90d","premium_amount":1200,"ingestion_ts":"2024-01-15T09:55:00Z","_kafka_offset":10}
+{"policy_id":100,"source_system":"crm","policy_status":"lapsed","coverage_type":"ltc","daily_benefit_amount":200,"benefit_period":"3y","elimination_period":"90d","premium_amount":1200,"ingestion_ts":"2024-01-15T10:20:00Z","_kafka_offset":11}
+{"policy_id":101,"source_system":"admin","policy_status":"active","coverage_type":"ltc","daily_benefit_amount":180,"benefit_period":"2y","elimination_period":"60d","premium_amount":900,"ingestion_ts":"2024-01-15T10:10:00Z","_kafka_offset":5}

@@ -1,0 +1,2 @@
+{"claim_id":5000,"source_system":"crm","claimant_id":1,"policy_id":100,"claim_status":"OPEN","claim_amount":1500.75,"service_date":"2024-01-14","submitted_at":"2024-01-15T09:00:00Z","ingestion_ts":"2024-01-15T10:12:00Z","_kafka_offset":200}
+{"claim_id":5001,"source_system":"admin","claimant_id":2,"policy_id":101,"claim_status":"PENDING","claim_amount":800.00,"service_date":"2024-01-13","submitted_at":"2024-01-15T09:05:00Z","ingestion_ts":"2024-01-15T10:15:00Z","_kafka_offset":210}
