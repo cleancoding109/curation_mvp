@@ -795,10 +795,189 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
-```───────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 7. Error Handling Strategy
+## 7. Orchestration Strategy
+
+### 8.1 Hierarchical Execution Model
+
+The framework uses a **Sub-Domain Ordered** orchestration strategy where tables are loaded in a sequence that respects data model dependencies.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Orchestration Hierarchy                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  WORKFLOW (Databricks Job)                                                   │
+│  └── Scheduled: Hourly                                                      │
+│  └── Scope: All Sub-Domains                                                 │
+│                                                                              │
+│       ┌─────────────────────┐                                               │
+│       │   SUB-DOMAIN 1    │   (e.g., Party: Claimants, Providers)            │
+│       │   load_order: 1   │                                                  │
+│       └─────────────────────┘                                               │
+│               │                                                              │
+│       ┌───────┴───────┬───────────────┐                                     │
+│       │               │               │  Tables within sub-domain           │
+│       ▼               ▼               ▼  run in data model sequence          │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐                               │
+│  │ Pipeline │   │ Pipeline │   │ Pipeline │  Each pipeline = 1 table       │
+│  │ Claimant │──▶│ Provider │──▶│ Policy   │                               │
+│  │ seq: 1   │   │ seq: 2   │   │ seq: 3   │                               │
+│  └──────────┘   └──────────┘   └──────────┘                               │
+│               │                                                              │
+│               ▼  (After Sub-Domain 1 completes)                              │
+│       ┌─────────────────────┐                                               │
+│       │   SUB-DOMAIN 2    │   (e.g., Claims: Claims, Claim Lines)            │
+│       │   load_order: 2   │                                                  │
+│       └─────────────────────┘                                               │
+│               │                                                              │
+│       ┌───────┴───────┬───────────────┐                                     │
+│       │               │               │                                      │
+│       ▼               ▼               ▼                                      │
+│  ┌──────────┐   ┌──────────┐   ┌────────────┐                             │
+│  │ Pipeline │   │ Pipeline │   │ Pipeline   │                             │
+│  │ Claims   │──▶│ ClaimLine│──▶│ ClaimDiag  │                             │
+│  │ seq: 1   │   │ seq: 2   │   │ seq: 3     │                             │
+│  └──────────┘   └──────────┘   └────────────┘                             │
+│               │                                                              │
+│               ▼  (After Sub-Domain 2 completes)                              │
+│       ┌─────────────────────┐                                               │
+│       │   SUB-DOMAIN 3    │   (e.g., Financials: Payments, Adjustments)      │
+│       │   load_order: 3   │                                                  │
+│       └─────────────────────┘                                               │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 Configuration Structure
+
+**Sub-Domain Configuration:**
+```json
+{
+  "sub_domains": [
+    {
+      "name": "party",
+      "description": "Party entities (Claimants, Providers)",
+      "load_order": 1,
+      "tables": [
+        { "table_name": "silver_claimants", "sequence": 1 },
+        { "table_name": "silver_providers", "sequence": 2 },
+        { "table_name": "silver_policies", "sequence": 3 }
+      ]
+    },
+    {
+      "name": "claims",
+      "description": "Claims processing entities",
+      "load_order": 2,
+      "tables": [
+        { "table_name": "silver_claims", "sequence": 1 },
+        { "table_name": "silver_claim_lines", "sequence": 2 },
+        { "table_name": "silver_claim_diagnoses", "sequence": 3 }
+      ]
+    },
+    {
+      "name": "financials",
+      "description": "Financial transactions",
+      "load_order": 3,
+      "tables": [
+        { "table_name": "silver_payments", "sequence": 1 },
+        { "table_name": "silver_adjustments", "sequence": 2 }
+      ]
+    }
+  ]
+}
+```
+
+### 8.3 Execution Rules
+
+| Rule | Description |
+|------|-------------|
+| **Sub-Domain Ordering** | Sub-domains execute in `load_order` sequence (1, 2, 3...) |
+| **Table Sequencing** | Tables within a sub-domain execute in `sequence` order |
+| **Pipeline Isolation** | Each pipeline loads exactly **one target table** |
+| **Dependency Wait** | Sub-domain N+1 starts only after Sub-domain N completes successfully |
+| **Parallel Within Domain** | Tables with same `sequence` can run in parallel (optional) |
+| **Failure Handling** | Table failure logs error but continues; sub-domain fails if critical table fails |
+
+### 8.4 DAB Job Definition
+
+```yaml
+# resources/curation_workflow.job.yml
+resources:
+  jobs:
+    ltc_curation_workflow:
+      name: "LTC Claims Curation Workflow"
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"  # Hourly
+        timezone_id: "America/New_York"
+      
+      tasks:
+        # Sub-Domain 1: Party
+        - task_key: "party_claimants"
+          notebook_task:
+            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            base_parameters:
+              table_name: "silver_claimants"
+        
+        - task_key: "party_providers"
+          depends_on:
+            - task_key: "party_claimants"
+          notebook_task:
+            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            base_parameters:
+              table_name: "silver_providers"
+        
+        - task_key: "party_policies"
+          depends_on:
+            - task_key: "party_providers"
+          notebook_task:
+            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            base_parameters:
+              table_name: "silver_policies"
+        
+        # Sub-Domain 2: Claims (depends on Party completion)
+        - task_key: "claims_claims"
+          depends_on:
+            - task_key: "party_policies"
+          notebook_task:
+            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            base_parameters:
+              table_name: "silver_claims"
+        
+        - task_key: "claims_claim_lines"
+          depends_on:
+            - task_key: "claims_claims"
+          notebook_task:
+            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            base_parameters:
+              table_name: "silver_claim_lines"
+        
+        # Sub-Domain 3: Financials (depends on Claims completion)
+        - task_key: "financials_payments"
+          depends_on:
+            - task_key: "claims_claim_lines"
+          notebook_task:
+            notebook_path: "${workspace.file_path}/src/pipeline.ipynb"
+            base_parameters:
+              table_name: "silver_payments"
+```
+
+### 8.5 LTC Claims Data Model Sequence
+
+| Sub-Domain | Sequence | Entity | Depends On | SCD Type |
+|------------|----------|--------|------------|----------|
+| Party | 1 | Claimants | - | SCD2 |
+| Party | 2 | Providers | - | SCD2 |
+| Party | 3 | Policies | Claimants | SCD2 |
+| Claims | 1 | Claims | Claimants, Policies, Providers | SCD1 |
+| Claims | 2 | Claim Lines | Claims | SCD1 |
+| Claims | 3 | Claim Diagnoses | Claims | SCD1 |
+| Claims | 4 | Assessments | Claimants | SCD2 |
+| Financials | 1 | Payments | Claims | SCD1 |
+| Financials | 2 | Adjustments | Payments | SCD1 |
+
+## 8. Error Handling Strategy
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -835,7 +1014,7 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 10. Technology Stack
+## 9. Technology Stack
 
 | Component | Technology |
 |-----------|------------|
@@ -848,7 +1027,7 @@ CREATE TABLE IF NOT EXISTS silver.curation_audit_log (
 | Package Management | UV (Python) |
 | Testing | pytest + Databricks Connect |
 
-## 11. Key Design Decisions
+## 10. Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
