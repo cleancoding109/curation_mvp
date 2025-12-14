@@ -49,8 +49,9 @@ To handle the multi-source nature of the Bronze layer, the Silver layer implemen
     - For transactional entities (like Claims or Payments) that are distinct across systems, records are **unioned**.
     - A `source_system` column is maintained in Silver to track lineage.
 
-3.  **Business Key Management**:
-    - The Silver layer generates its own surrogate keys (e.g., `claimant_sk`) or uses a standardized Business Key that abstracts away the source-specific IDs.
+3.  **Key Strategy**:
+    - **Merge Keys**: The framework uses **Business Keys** (e.g., `claim_id`) to match incoming records to existing Silver records.
+    - **Identity Keys**: The Silver layer may optionally generate **Surrogate Keys** (e.g., `claimant_sk`) for downstream modeling, but these are not used for the merge condition.
 
 ## 2. Architecture
 
@@ -132,17 +133,18 @@ To handle the multi-source nature of the Bronze layer, the Silver layer implemen
 
 ### 3.1 High-Watermark Incremental Processing
 
-The framework uses a high-watermark pattern to efficiently process only new records from streaming tables without scanning the full history.
+The framework uses a **Control Table** pattern to track the high watermark of the *source* data, ensuring no data loss even with late-arriving records.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    High-Watermark Processing Flow                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  Step 1: Query Target Table                                                  │
+│  Step 1: Get Last Processed Timestamp                                        │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  SELECT MAX(processing_timestamp) FROM silver.table                  │    │
-│  │  Result: 2024-01-15 10:30:00 (High Watermark)                        │    │
+│  │  SELECT watermark_value FROM silver.control_table                    │    │
+│  │  WHERE table_name = 'silver.customers'                               │    │
+│  │  Result: 2024-01-15 10:30:00 (Source Ingestion TS)                   │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                       │
 │                                      ▼                                       │
@@ -153,19 +155,20 @@ The framework uses a high-watermark pattern to efficiently process only new reco
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                      │                                       │
 │                                      ▼                                       │
-│  Step 3: Process Only New Records                                            │
+│  Step 3: Process & Update Watermark                                          │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Apply transformations and merge into target                         │    │
+│  │  1. Calculate max(ingestion_ts) from CURRENT BATCH                   │    │
+│  │  2. Apply transformations and merge into target                      │    │
+│  │  3. UPDATE silver.control_table SET watermark_value = new_max_ts     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Benefits:**
-- Efficient processing of real-time streaming sources using batch semantics
-- No need for Structured Streaming checkpoints
-- Predictable resource usage and costs
-- Easy recovery and reprocessing
+- **Correctness**: Compares "apples to apples" (Source TS vs Source TS).
+- **Replayability**: Can reset the control table to reprocess data.
+- **Resilience**: Decouples job execution time from data arrival time.
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -208,7 +211,7 @@ SCD Type 1 maintains only the current state of records by overwriting changes.
 
 ### 3.3 SCD Type 2 (History Tracking Pattern)
 
-SCD Type 2 maintains full history of changes without surrogate keys.
+SCD Type 2 maintains full history of changes.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -226,9 +229,11 @@ SCD Type 2 maintains full history of changes without surrogate keys.
 │                                                                              │
 │  Processing Steps:                                                           │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  1. Detect change: name "John" → "John Smith"                        │    │
-│  │  2. Close old record: UPDATE effective_end, is_current=false         │    │
-│  │  3. Insert new version with is_current=true                          │    │
+│  │  1. Intra-Batch Deduplication: Window over (partition by key         │    │
+│  │     order by source_ts desc) to pick latest record per key.          │    │
+│  │  2. Change Detection: Compare MD5(track_columns) of source vs target.│    │
+│  │  3. Close old record: UPDATE effective_end, is_current=false         │    │
+│  │  4. Insert new version with is_current=true                          │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  Target Table (After):                                                       │
@@ -243,10 +248,10 @@ SCD Type 2 maintains full history of changes without surrogate keys.
 ```
 
 **Key Design Decisions:**
-- No surrogate keys - uses natural business keys
-- Batch-optimized staging/union approach (not row-by-row)
-- Configurable columns to track for changes
-- Separate merge operations for closing and inserting
+- **Business Keys for Merging**: The merge condition strictly uses immutable Business Keys (e.g., `claim_id`).
+- **Surrogate Keys (Optional)**: If generated, they are for downstream modeling only, not for the merge logic.
+- **Deterministic Change Detection**: Uses `md5(concat_ws(..., track_columns))` to reliably detect changes.
+- **Intra-Batch Deduplication**: Ensures only the latest state of an entity is applied if multiple updates arrive in one batch.
 
 ## 4. Data Flow
 
@@ -357,7 +362,6 @@ SCD Type 2 maintains full history of changes without surrogate keys.
   "log_level": "INFO"
 }
 ```
-
 ## 6. Deployment Architecture
 
 ```
@@ -377,8 +381,10 @@ SCD Type 2 maintains full history of changes without surrogate keys.
 │  ┌─────────────────────┐             ┌─────────────────────────────────┐    │
 │  │  databricks.yml     │             │  Artifacts                      │    │
 │  │  - Bundle config    │   deploy    │  ├── Python Wheel (.whl)        │    │
-│  │  - Target envs      │ ──────────▶ │  └── Configuration files        │    │
-│  └─────────────────────┘             └─────────────────────────────────┘    │
+│  │  - Target envs      │ ──────────▶ │  └── Workspace Files            │    │
+│  └─────────────────────┘             │      ├── conf/tables_config.json│    │
+│                                      │      └── conf/sql/*.sql         │    │
+│                                      └─────────────────────────────────┘    │
 │                                                                              │
 │  Targets:                                                                    │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -387,6 +393,7 @@ SCD Type 2 maintains full history of changes without surrogate keys.
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
+```───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 7. Error Handling Strategy

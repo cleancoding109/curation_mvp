@@ -95,6 +95,15 @@
 | 7.3 | Create unit tests for multi-source merge scenarios | ⏳ Pending |
 | 7.4 | Validate deduplication logic against Bronze sample data | ⏳ Pending |
 
+### Phase 8: Robustness & Operability (New)
+
+| Task | Description | Status |
+|------|-------------|--------|
+| 8.1 | Implement Watermark Control Table (replace target-based watermark) | ⏳ Pending |
+| 8.2 | Add Intra-Batch Deduplication (Window functions) to SCD2 logic | ⏳ Pending |
+| 8.3 | Implement Deterministic Change Detection (MD5 hashing) | ⏳ Pending |
+| 8.4 | Update DAB config to deploy SQL/JSON as Workspace Files | ⏳ Pending |
+
 ## 3. File Structure
 
 ```
