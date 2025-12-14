@@ -86,14 +86,14 @@
 | 6.4 | Deploy to prod environment | ⏳ Pending |
 | 6.5 | Enable scheduling | ⏳ Pending |
 
-### Phase 7: Entity Resolution & Upstream Integration (New)
+### Phase 7: Multi-Source Integration (Updated)
 
 | Task | Description | Status |
 |------|-------------|--------|
-| 7.1 | Update SQL transforms for Priority Logic (Rank/Window functions) | ⏳ Pending |
-| 7.2 | Implement `source_system` column handling in Silver schemas | ⏳ Pending |
-| 7.3 | Create unit tests for multi-source merge scenarios | ⏳ Pending |
-| 7.4 | Validate deduplication logic against Bronze sample data | ⏳ Pending |
+| 7.1 | Update SQL transforms to propagate `source_system` column | ⏳ Pending |
+| 7.2 | Update Silver schemas to include `source_system` in PK/Clustering | ⏳ Pending |
+| 7.3 | Update SCD Merge logic to include `source_system` in match condition | ⏳ Pending |
+| 7.4 | Validate that multiple sources for same entity co-exist correctly | ⏳ Pending |
 
 ### Phase 8: Robustness & Operability (New)
 
