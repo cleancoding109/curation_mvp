@@ -202,55 +202,79 @@ The framework enforces a clear separation of concerns between **infrastructure**
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│                    FRAMEWORK RESPONSIBILITIES                           │
-│                     (Infrastructure Layer)                              │
+│                    FRAMEWORK RESPONSIBILITIES                             │
+│                     (Infrastructure Layer)                                │
 ├───────────────────────────────────────────────────────────────────────────┤
-│  1. Read Bronze with watermark + lookback filter                        │
-│  2. Apply metadata-driven deduplication (ROW_NUMBER)                    │
-│  3. Register temp views: `source_deduped`, reference tables             │
-│  4. Substitute ${variables} in SQL                                      │
-│  5. Execute developer SQL                                               │
-│  6. Validate output schema (required columns present)                   │
-│  7. Cache/persist prepared DataFrame                                    │
-│  8. Execute SCD1 or SCD2 merge                                          │
-│  9. Update watermark in control table                                   │
-│  10. Write audit log                                                    │
+│  1. Read Bronze with watermark + lookback filter                          │
+│  2. Apply metadata-driven deduplication (ROW_NUMBER)                      │
+│  3. Resolve {{source}} and {{ref:*}} placeholders to qualified tables     │
+│  4. Generate hash keys from metadata ({{_pk_hash}}, {{_diff_hash}})       │
+│  5. Substitute placeholders and execute developer SQL                     │
+│  6. Validate output schema (required columns present)                     │
+│  7. Cache/persist prepared DataFrame                                      │
+│  8. Execute SCD1 or SCD2 merge (passthrough or framework-managed)         │
+│  9. Update watermark in control table                                     │
+│  10. Write audit log                                                      │
 └───────────────────────────────────────────────────────────────────────────┘
                                 │
-                                │ Provides: source_deduped, ref_* views
+                                │ Provides: placeholder resolution, hash generation
                                 ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│                    DEVELOPER RESPONSIBILITIES                           │
-│                   (Transformation SQL per Table)                        │
+│                    DEVELOPER RESPONSIBILITIES                             │
+│                   (SQL Template per Table)                                │
 ├───────────────────────────────────────────────────────────────────────────┤
-│  1. Read from `source_deduped` (NOT source_incremental)                 │
-│  2. Join to reference tables (ref_providers, ref_icd_codes, etc.)      │
-│  3. Apply business logic, cleansing, type casting                      │
-│  4. Apply timezone conversions using ${variables}                      │
-│  5. Compute `_pk_hash` = SHA2(business_keys + source_system)            │
-│  6. Compute `_diff_hash` = SHA2(track_columns) for SCD2                 │
-│  7. Return transformed DataFrame with required columns                 │
+│  1. Use {{source}} placeholder for source table (NOT hardcoded names)     │
+│  2. Use {{ref:table}} for reference table joins                           │
+│  3. Use {{alias:column}} for columns from reference tables                │
+│  4. Include {{_pk_hash}} and {{_diff_hash}} placeholders                  │
+│  5. Apply business logic, cleansing, type casting                         │
+│  6. Apply timezone conversions                                            │
+│  7. Include deleted_ind and SCD2 columns for passthrough mode             │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Contract: Framework-Provided Temp Views**
+**Placeholder Syntax Reference:**
 
-| View Name | Description | Created By |
-|-----------|-------------|------------|
-| `source_deduped` | Deduplicated source data (one row per entity) | Framework |
-| `ref_<alias>` | Reference table (e.g., `ref_providers`) | Framework |
+| Placeholder | Purpose | Resolution |
+|-------------|---------|------------|
+| `{{source}}` | Source table reference | `{catalog}.{source.schema}.{source.table}` |
+| `{{ref:table_name}}` | Reference table join | `{catalog}.{ref.schema}.{ref.table}` |
+| `{{alias:column}}` | Column from reference | `{alias}.{column}` |
+| `{{_pk_hash}}` | Entity hash (merge key) | Generated SHA2 expression from `hash_keys._pk_hash.columns` |
+| `{{_diff_hash}}` | Change hash (SCD2) | Generated SHA2 expression from `hash_keys._diff_hash.track_columns` |
 
-**Contract: Developer SQL Must NOT:**
+**Contract: Developer SQL Template Must:**
+- Use `{{source}}` placeholder (NOT hardcoded table names)
+- Include `{{_pk_hash}}` and `{{_diff_hash}}` placeholders
+- Include `deleted_ind` column with appropriate default
+- Include SCD2 columns when using passthrough mode
+- Use `src` alias for source table
+
+**Contract: Developer SQL Template Must NOT:**
+- Hardcode catalog or schema names
+- Implement hash key generation logic
 - Implement deduplication (no `ROW_NUMBER()` partitioned by business keys)
-- Read directly from `source_incremental` (use `source_deduped` instead)
-- Manage watermarks or control tables
 - Implement SCD merge logic
 
-**Contract: Developer SQL MUST:**
-- Read from `source_deduped`
-- Output `_pk_hash` column (for all tables)
-- Output `_diff_hash` column (for SCD2 tables)
-- Output all business columns needed in Silver
+**Example SQL Template:**
+```sql
+SELECT
+  {{_pk_hash}},
+  {{_diff_hash}},
+  src.claim_id,
+  src.claimant_id AS customer_id,
+  src.adjuster_id,
+  {{adj:adjuster_name}} AS adjuster_name,
+  {{adj:adjuster_region}} AS adjuster_region,
+  to_utc_timestamp(src.event_timestamp, 'America/New_York') AS event_at_utc,
+  src.source_system,
+  coalesce(src.deleted_ind, false) AS deleted_ind,
+  src.effective_start_date,
+  src.effective_end_date,
+  src.is_current
+FROM {{source}} src
+LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
+```
 
 ### 3.2 SCD Type 1 (Upsert Pattern)
 
@@ -297,18 +321,64 @@ This framework uses a **Hash-Based SCD Type 2** approach for performance and det
 
 #### 3.3.1 Hash Key Concepts
 
-Two internal hash columns are generated to simplify logic:
+Two internal hash columns are generated by the **framework at runtime** based on metadata configuration:
 
 1.  **Entity Hash (`_pk_hash`)**:
     - **Purpose**: Uniquely identifies the entity across time. Used as the **Merge Key**.
     - **Formula**: `SHA2(CONCAT_WS('|', business_key_1, business_key_n, source_system), 256)`
-    - **Benefit**: Replaces complex multi-column join conditions with a single string comparison.
+    - **Configuration**: Defined in `hash_keys._pk_hash.columns` in metadata JSON
+    - **SQL Placeholder**: `{{_pk_hash}}`
 
 2.  **Change Hash (`_diff_hash`)**:
     - **Purpose**: Detects if any business value has changed.
     - **Formula**: `SHA2(CONCAT_WS('|', col1, col2, col3...), 256)` (all `track_columns`)
-    - **Benefit**: Avoids expensive column-by-column comparisons; handles nulls consistently.
+    - **Configuration**: Defined in `hash_keys._diff_hash.track_columns` in metadata JSON
+    - **SQL Placeholder**: `{{_diff_hash}}`
     - **Algorithm**: SHA-256 chosen over MD5 for collision resistance in regulated domains.
+
+**Metadata Configuration Example:**
+```json
+{
+  "hash_keys": {
+    "_pk_hash": {
+      "description": "Entity Hash (Merge Key)",
+      "algorithm": "SHA2-256",
+      "columns": ["claim_id", "source_system"]
+    },
+    "_diff_hash": {
+      "description": "Change Hash (SCD2 Change Detection)",
+      "algorithm": "SHA2-256",
+      "track_columns": ["claimant_id", "policy_number", "claim_type", "claim_amount"]
+    }
+  },
+  "source_system_column": "source_system"
+}
+```
+
+**SQL Template Usage:**
+```sql
+SELECT
+  {{_pk_hash}},
+  {{_diff_hash}},
+  src.claim_id,
+  ...
+FROM {{source}} src
+```
+
+**Framework Runtime Resolution:**
+The framework generates the complete hash expressions with proper canonicalization:
+```sql
+SHA2(CONCAT_WS('|',
+  COALESCE(CAST(src.claim_id AS STRING), '__NULL__'),
+  COALESCE(src.source_system, '__NULL__')
+), 256) AS _pk_hash
+```
+
+**Benefits of Framework-Managed Hash Generation:**
+- **Consistency**: All tables use identical canonicalization rules
+- **Error Reduction**: Developers cannot forget NULL handling, TRIM, or type casting
+- **Maintainability**: Hash algorithm changes require only framework code updates
+- **Cleaner SQL**: Business logic is not obscured by ~20 lines of hash boilerplate
 
 #### 3.3.2 Hash Canonicalization Rules
 
@@ -327,11 +397,62 @@ To ensure deterministic hashing across runs and Spark versions:
 | Parameter | Description | Example |
 |-----------|-------------|---------|
 | `business_key_columns` | Columns defining the entity identity. | `["claim_id"]` |
-| `track_columns` | Columns to monitor for history. | `["status", "amount", "diagnosis_code"]` |
-| `scd2_columns` | Metadata columns for versioning. | `{"start": "eff_start", "end": "eff_end", "curr": "is_current"}` |
-| `source_system_col` | Column identifying data origin. | `"source_system"` |
+| `hash_keys._pk_hash.columns` | Columns for entity hash (usually business_key + source_system). | `["claim_id", "source_system"]` |
+| `hash_keys._diff_hash.track_columns` | Columns to monitor for history. | `["status", "amount", "diagnosis_code"]` |
+| `scd2_columns` | Metadata columns for versioning. | `{"effective_start_date": "...", "effective_end_date": "...", "is_current": "..."}` |
+| `source_system_column` | Column identifying data origin. | `"source_system"` |
+| `scd2_mode` | Historical vs incremental behavior. | `{"historical": "passthrough", "incremental": "framework_managed"}` |
 
-#### 3.3.4 Logic Flow Diagram
+#### 3.3.4 Dual-Mode SCD2 Processing
+
+The framework supports two SCD2 modes to handle different data source scenarios:
+
+| Mode | Configuration | Behavior | Use Case |
+|------|---------------|----------|----------|
+| **Passthrough** | `scd2_mode.historical: "passthrough"` | Preserve SCD2 columns from source | Historical/batch loads from Bronze with existing SCD2 history |
+| **Framework-Managed** | `scd2_mode.incremental: "framework_managed"` | Framework detects changes and manages SCD2 columns | Real-time Kafka events without SCD2 metadata |
+
+**Metadata Configuration:**
+```json
+{
+  "load_strategy": {
+    "type": "scd2",
+    "business_keys": ["claim_id"],
+    "scd2_mode": {
+      "historical": "passthrough",
+      "incremental": "framework_managed"
+    },
+    "scd2_columns": {
+      "effective_start_date": "effective_start_date",
+      "effective_end_date": "effective_end_date",
+      "is_current": "is_current"
+    }
+  }
+}
+```
+
+**SQL Template for Passthrough Mode:**
+```sql
+SELECT
+  {{_pk_hash}},
+  {{_diff_hash}},
+  src.claim_id,
+  ...
+  src.source_system,
+  coalesce(src.deleted_ind, false) AS deleted_ind,
+  src.effective_start_date,
+  src.effective_end_date,
+  src.is_current
+FROM {{source}} src
+```
+
+**Soft Delete Indicator:**
+All SCD2 tables include a `deleted_ind` column for audit compliance:
+- If source provides `deleted_ind`, it's passed through
+- If source doesn't have it, defaults to `false`
+- Enables tracking of logically deleted records without physical deletion
+
+#### 3.3.5 Logic Flow Diagram
 
 **Pre-Merge Steps (Mandatory):**
 1. **Batch Reduction**: Deduplicate incoming data to one row per `(business_key, source_system)` using configured ordering.
@@ -458,11 +579,183 @@ To ensure deterministic hashing across runs and Spark versions:
 
 ## 5. Configuration Schema
 
-### 5.1 Parameterized SQL Transformations
+### 5.1 Project Directory Structure
 
-All transformations are implemented in **pure Spark SQL** (no Python UDFs). Parameters are injected into SQL at runtime using variable substitution.
+The framework uses a clear separation of concerns with dedicated folders:
 
-#### 5.1.1 Timezone Conversion
+```
+curation_framework/
+├── databricks.yml              # DAB config with catalog per environment
+├── metadata/
+│   └── sdl/                    # Standardized Data Layer
+│       └── claims/             # Domain-organized metadata
+│           ├── customer.json
+│           └── claims.json
+├── query/                      # SQL transformation templates
+│   ├── customer.sql
+│   └── claims.sql
+├── fixtures/                   # Reference table DDL & data
+│   ├── adjuster_lookup.sql
+│   └── state_lookup.sql
+├── src/                        # Framework Python code
+│   └── curation_framework/
+└── resources/                  # Databricks job/pipeline definitions
+    └── *.yml
+```
+
+**Directory Responsibilities:**
+
+| Directory | Purpose |
+|-----------|---------|
+| `metadata/` | Table configuration JSON files organized by domain |
+| `query/` | SQL transformation templates with placeholder syntax |
+| `fixtures/` | Reference table DDL and seed data scripts |
+| `src/` | Framework Python implementation |
+| `resources/` | Databricks Asset Bundle resource definitions |
+
+### 5.2 Environment Configuration (databricks.yml)
+
+Catalog and other environment-specific values are configured in `databricks.yml`, NOT in metadata files:
+
+```yaml
+bundle:
+  name: curation_framework
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://example.cloud.databricks.com
+    variables:
+      catalog: ltc_insurance_dev
+      
+  prod:
+    mode: production
+    workspace:
+      host: https://example.cloud.databricks.com
+    variables:
+      catalog: ltc_insurance_prod
+```
+
+**Rationale:**
+- Same metadata files work across dev/staging/prod without modification
+- Eliminates risk of deploying dev catalog references to production
+- Follows Databricks Asset Bundle best practices
+
+### 5.3 Table Metadata Configuration
+
+Each table has a JSON configuration file in `metadata/sdl/{domain}/`:
+
+```json
+{
+  "table_name": "claims",
+  "description": "Standardized Claims Data",
+  
+  "source": {
+    "schema": "unified_dev",
+    "table": "unified_claims_scd2"
+  },
+  
+  "target": {
+    "schema": "standardized_data_layer",
+    "table": "claims"
+  },
+  
+  "load_strategy": {
+    "type": "scd2",
+    "business_keys": ["claim_id"],
+    "scd2_mode": {
+      "historical": "passthrough",
+      "incremental": "framework_managed"
+    },
+    "scd2_columns": {
+      "effective_start_date": "effective_start_date",
+      "effective_end_date": "effective_end_date",
+      "is_current": "is_current"
+    }
+  },
+  
+  "hash_keys": {
+    "_pk_hash": {
+      "description": "Entity Hash (Merge Key)",
+      "algorithm": "SHA2-256",
+      "columns": ["claim_id", "source_system"]
+    },
+    "_diff_hash": {
+      "description": "Change Hash (SCD2 Change Detection)",
+      "algorithm": "SHA2-256",
+      "track_columns": ["claimant_id", "policy_number", "claim_type", "claim_amount"]
+    }
+  },
+  
+  "source_system_column": "source_system",
+  
+  "reference_joins": [
+    {
+      "table": "adjuster_lookup",
+      "schema": "standardized_data_layer",
+      "alias": "adj",
+      "join_type": "LEFT",
+      "join_condition": "src.adjuster_id = adj.adjuster_id"
+    }
+  ],
+  
+  "columns": [
+    { "source_col": "claim_id", "target_col": "claim_id", "type": "string" },
+    { "source_col": "claimant_id", "target_col": "customer_id", "type": "string" },
+    { "source_col": "adj.adjuster_name", "target_col": "adjuster_name", "type": "string", "from_reference": true }
+  ]
+}
+```
+
+**Note:** The `columns` section serves as documentation and schema contract. The SQL template is the source of truth for transformation logic.
+
+### 5.4 SQL Template Syntax
+
+SQL templates use placeholder syntax for framework-managed elements. All transformations are implemented in **pure Spark SQL** (no Python UDFs).
+
+#### 5.4.1 Placeholder Reference
+
+| Placeholder | Purpose | Example Resolution |
+|-------------|---------|-------------------|
+| `{{source}}` | Source table | `ltc_insurance.unified_dev.unified_claims_scd2` |
+| `{{ref:table_name}}` | Reference table | `ltc_insurance.standardized_data_layer.adjuster_lookup` |
+| `{{alias:column}}` | Reference column | `adj.adjuster_name` |
+| `{{_pk_hash}}` | Entity hash expression | `SHA2(CONCAT_WS('|', ...), 256) AS _pk_hash` |
+| `{{_diff_hash}}` | Change hash expression | `SHA2(CONCAT_WS('|', ...), 256) AS _diff_hash` |
+
+#### 5.4.2 Complete SQL Template Example
+
+```sql
+-- query/claims.sql
+SELECT
+  {{_pk_hash}},
+  {{_diff_hash}},
+  src.claim_id,
+  src.claimant_id AS customer_id,
+  src.policy_number,
+  src.claim_type,
+  src.step_name AS workflow_step,
+  src.step_status AS workflow_status,
+  src.adjuster_id,
+  {{adj:adjuster_name}} AS adjuster_name,
+  {{adj:adjuster_region}} AS adjuster_region,
+  src.claim_decision AS decision,
+  src.denial_reason,
+  src.claim_amount AS requested_amount,
+  src.approved_amount,
+  to_utc_timestamp(src.event_timestamp, 'America/New_York') AS event_at_utc,
+  src.source_system,
+  coalesce(src.deleted_ind, false) AS deleted_ind,
+  src.effective_start_date,
+  src.effective_end_date,
+  src.is_current
+FROM {{source}} src
+LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
+```
+
+#### 5.4.3 Timezone Conversion
 
 Source data may arrive in UTC or source-system-local time. The framework supports parameterized timezone conversion.
 
@@ -500,243 +793,208 @@ FROM source_incremental
 
 #### 5.1.2 Reference Data Lookups
 
-Enrich source data by joining to reference/dimension tables. Reference tables are registered as temp views before transformation SQL executes.
+Enrich source data by joining to persistent reference tables in SDL. Reference tables are created via fixture scripts and configured in metadata.
 
-**Configuration:**
+**Fixture Script (`fixtures/state_lookup.sql`):**
+```sql
+CREATE TABLE IF NOT EXISTS ${catalog}.standardized_data_layer.state_lookup (
+  state_code STRING,
+  state_name STRING,
+  region STRING
+);
+
+INSERT OVERWRITE ${catalog}.standardized_data_layer.state_lookup VALUES
+  ('AL', 'Alabama', 'Southeast'),
+  ('AK', 'Alaska', 'West'),
+  ...
+```
+
+**Metadata Configuration:**
 ```json
 {
-  "reference_tables": [
+  "reference_joins": [
     {
-      "alias": "ref_providers",
-      "table": "silver.dim_providers",
-      "filter": "is_current = true"
-    },
-    {
-      "alias": "ref_icd_codes",
-      "table": "silver.dim_icd_codes",
-      "filter": null
+      "table": "state_lookup",
+      "schema": "standardized_data_layer",
+      "alias": "st",
+      "join_type": "LEFT",
+      "join_condition": "src.state_code = st.state_code"
     }
   ]
 }
 ```
 
-**SQL Pattern:**
+**SQL Template Pattern:**
 ```sql
 SELECT
-  s.claim_id,
-  s.provider_id,
-  p.provider_name,
-  p.provider_npi,
-  s.diagnosis_code,
-  icd.diagnosis_description,
-  icd.diagnosis_category
-FROM source_incremental s
-LEFT JOIN ref_providers p
-  ON s.provider_id = p.provider_id
-LEFT JOIN ref_icd_codes icd
-  ON s.diagnosis_code = icd.icd_code
+  src.customer_id,
+  src.state_code,
+  {{st:state_name}} AS state_name,
+  {{st:region}} AS region
+FROM {{source}} src
+LEFT JOIN {{ref:state_lookup}} st ON src.state_code = st.state_code
 ```
 
 **Design Principles:**
-- **No Python UDFs**: All logic in native Spark SQL for performance and maintainability.
-- **LEFT JOIN Default**: Reference lookups use LEFT JOIN to avoid dropping records when reference data is missing.
-- **Current Records Only**: Dimension tables filtered to `is_current = true` for SCD2 dimensions.
-- **Broadcast Hint**: Small reference tables can use `/*+ BROADCAST(ref_providers) */` for performance.
+- **Persistent Tables**: Reference tables exist as standard Delta tables in SDL, not temp views.
+- **Placeholder Resolution**: `{{ref:table}}` resolves to fully-qualified name using catalog from environment.
+- **Column Placeholders**: `{{alias:column}}` provides clean syntax for reference columns.
+- **LEFT JOIN Default**: Avoid dropping records when reference data is missing.
+- **Broadcast Hint**: Small reference tables can use `/*+ BROADCAST(st) */` for performance.
 
-#### 5.1.3 SQL Variable Substitution
+#### 5.1.3 Complete Transformation Example
 
-The framework replaces `${variable_name}` placeholders in SQL files with values from configuration at runtime.
+This section demonstrates a complete end-to-end transformation for the `Claims` entity using the placeholder-based approach.
 
-**Available Variables:**
-| Variable | Source | Example |
-|----------|--------|---------|
-| `${source_timezone}` | Table config | `"UTC"` |
-| `${target_timezone}` | Table config | `"America/New_York"` |
-| `${catalog}` | Global settings | `"main"` |
-| `${schema_silver}` | Global settings | `"silver"` |
-| `${processing_date}` | Runtime | `"2024-01-15"` |
-
-#### 5.1.4 Complete Transformation Example
-
-This section demonstrates a complete end-to-end transformation for the `Claims` entity.
-
-**Framework Pre-Processing (Before SQL Execution):**
-
-```python
-# Framework creates these views BEFORE executing developer SQL
-
-# 1. Read Bronze with watermark + lookback
-source_incremental = spark.sql(f"""
-    SELECT * FROM {source_table}
-    WHERE {watermark_column} > ('{last_watermark}' - INTERVAL {lookback_interval})
-""")
-source_incremental.createOrReplaceTempView("source_incremental")
-
-# 2. Apply metadata-driven deduplication
-dedup_sql = f"""
-    SELECT * FROM (
-        SELECT *,
-            ROW_NUMBER() OVER (
-                PARTITION BY {', '.join(business_key_columns)}, {source_system_column}
-                ORDER BY {', '.join(dedup_order_columns)}
-            ) AS _dedup_rank
-        FROM source_incremental
-    ) WHERE _dedup_rank = 1
-"""
-source_deduped = spark.sql(dedup_sql).drop("_dedup_rank")
-source_deduped.createOrReplaceTempView("source_deduped")
-
-# 3. Register reference tables
-for ref in reference_tables:
-    ref_df = spark.table(ref.table)
-    if ref.filter:
-        ref_df = ref_df.filter(ref.filter)
-    ref_df.createOrReplaceTempView(ref.alias)
+**Metadata Configuration (`metadata/sdl/claims/claims.json`):**
+```json
+{
+  "table_name": "claims",
+  "source": {
+    "schema": "unified_dev",
+    "table": "claims",
+    "watermark_column": "ingestion_ts"
+  },
+  "target": {
+    "schema": "standardized_data_layer",
+    "table": "claims"
+  },
+  "hash_keys": {
+    "_pk_hash": {
+      "columns": ["claim_id", "source_system"]
+    },
+    "_diff_hash": {
+      "track_columns": ["claimant_id", "policy_number", "claim_type", "claim_amount"]
+    }
+  },
+  "reference_joins": [
+    {
+      "table": "adjuster_lookup",
+      "schema": "standardized_data_layer",
+      "alias": "adj",
+      "join_type": "LEFT",
+      "join_condition": "src.adjuster_id = adj.adjuster_id"
+    }
+  ],
+  "load_strategy": {
+    "type": "scd2",
+    "scd2_mode": "passthrough"
+  }
+}
 ```
 
-**Developer Transformation SQL (Reads from `source_deduped`):**
-
+**SQL Template (`query/claims.sql`):**
 ```sql
--- conf/sql/claims_transform.sql
--- Developer writes business logic, cleansing, and hash computation
--- Reads from `source_deduped` (framework-provided, already deduplicated)
+-- query/claims.sql
+-- Developer writes business logic; framework handles hash generation
 
 SELECT
+  -- Framework-generated hash keys (from metadata)
+  {{_pk_hash}},
+  {{_diff_hash}},
+  
   -- Business Keys
-  s.claim_id,
-  s.source_system,
+  src.claim_id,
+  src.source_system,
   
-  -- Foreign Keys
-  s.claimant_id,
-  s.provider_id,
-  s.policy_id,
+  -- Foreign Keys  
+  src.claimant_id AS customer_id,
+  src.policy_number,
   
-  -- Timezone Conversion: UTC -> Target Timezone
-  FROM_UTC_TIMESTAMP(s.service_date, '${target_timezone}') AS service_date,
-  FROM_UTC_TIMESTAMP(s.submitted_at, '${target_timezone}') AS submitted_at,
-  
-  -- Reference Data Enrichment: Provider
-  p.provider_name,
-  p.provider_npi,
-  p.provider_type,
-  
-  -- Reference Data Enrichment: ICD Codes
-  s.diagnosis_code,
-  icd.diagnosis_description,
-  icd.diagnosis_category,
-  icd.is_chronic,
-  
-  -- Reference Data Enrichment: Claim Status
-  s.claim_status AS claim_status_code,
-  cs.status_description AS claim_status_desc,
+  -- Reference Data Enrichment
+  src.adjuster_id,
+  {{adj:adjuster_name}} AS adjuster_name,
+  {{adj:adjuster_region}} AS adjuster_region,
   
   -- Business Logic: Computed Fields
-  s.claim_amount,
+  src.claim_amount,
   CASE 
-    WHEN s.claim_amount > 10000 THEN 'HIGH'
-    WHEN s.claim_amount > 1000 THEN 'MEDIUM'
+    WHEN src.claim_amount > 10000 THEN 'HIGH'
+    WHEN src.claim_amount > 1000 THEN 'MEDIUM'
     ELSE 'LOW'
   END AS claim_tier,
   
   -- Data Quality: Cleansing
-  TRIM(UPPER(s.claim_status)) AS claim_status_clean,
-  COALESCE(s.claim_amount, 0) AS claim_amount_safe,
+  TRIM(UPPER(src.claim_type)) AS claim_type,
   
-  -- *** REQUIRED: Hash Keys (Developer Computes) ***
-  SHA2(CONCAT_WS('|', 
-    COALESCE(CAST(s.claim_id AS STRING), '__NULL__'),
-    COALESCE(s.source_system, '__NULL__')
-  ), 256) AS _pk_hash,
+  -- Soft Delete Indicator
+  coalesce(src.deleted_ind, false) AS deleted_ind,
   
-  SHA2(CONCAT_WS('|',
-    COALESCE(s.claim_status, '__NULL__'),
-    COALESCE(CAST(s.claim_amount AS STRING), '__NULL__'),
-    COALESCE(s.diagnosis_code, '__NULL__'),
-    COALESCE(CAST(s.provider_id AS STRING), '__NULL__')
-  ), 256) AS _diff_hash,
-  
-  -- Metadata
-  s.ingestion_ts,
-  CURRENT_TIMESTAMP() AS processing_timestamp
+  -- SCD2 Columns (passthrough from source)
+  src.effective_start_date,
+  src.effective_end_date,
+  src.is_current
 
-FROM source_deduped s  -- ⭐ Read from framework-provided deduplicated view
-
--- Reference Data JOINs (framework registers these views)
-LEFT JOIN /*+ BROADCAST(ref_providers) */ ref_providers p
-  ON s.provider_id = p.provider_id
-  AND p.is_current = true
-  
-LEFT JOIN /*+ BROADCAST(ref_icd_codes) */ ref_icd_codes icd
-  ON s.diagnosis_code = icd.icd_code
-  
-LEFT JOIN /*+ BROADCAST(ref_claim_status) */ ref_claim_status cs
-  ON TRIM(UPPER(s.claim_status)) = cs.status_code
+FROM {{source}} src
+LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
 ```
 
+**Framework Placeholder Resolution:**
+
+At runtime, the framework transforms the SQL template:
+
+| Placeholder | Resolved Value |
+|-------------|----------------|
+| `{{source}}` | `ltc_insurance.unified_dev.claims` |
+| `{{ref:adjuster_lookup}}` | `ltc_insurance.standardized_data_layer.adjuster_lookup` |
+| `{{adj:adjuster_name}}` | `adj.adjuster_name` |
+| `{{_pk_hash}}` | `SHA2(CONCAT_WS('\|', COALESCE(CAST(src.claim_id AS STRING), '__NULL__'), COALESCE(src.source_system, '__NULL__')), 256) AS _pk_hash` |
+| `{{_diff_hash}}` | `SHA2(CONCAT_WS('\|', COALESCE(...), ...), 256) AS _diff_hash` |
+
 **Key Contract Enforcement:**
-- ✅ SQL reads from `source_deduped` (not `source_incremental`)
-- ✅ SQL outputs `_pk_hash` (required for all tables)
-- ✅ SQL outputs `_diff_hash` (required for SCD2)
-- ✅ SQL does NOT implement dedup logic (no ROW_NUMBER partition by keys)
-- ✅ Reference tables accessed via framework-registered views
+- ✅ SQL uses `{{source}}` placeholder (not hardcoded table names)
+- ✅ SQL uses `{{_pk_hash}}` and `{{_diff_hash}}` placeholders (framework generates hash logic)
+- ✅ SQL uses `{{ref:*}}` for reference tables (catalog resolved from environment)
+- ✅ SQL includes `deleted_ind` for soft delete support
+- ✅ SQL includes SCD2 columns for passthrough mode
 
 **Framework Post-Processing (After SQL Execution):**
 
-The framework takes the output of the transformation SQL and applies SCD2 logic:
+For `scd2_mode: "framework_managed"`, the framework applies SCD2 logic:
 
 ```sql
 -- Framework-generated SCD2 MERGE (not user-written)
--- This shows conceptually how the transformed data feeds into SCD2
+-- Used only when scd2_mode = "framework_managed"
 
--- 1. Get current records from target (semi-join optimized)
-CREATE OR REPLACE TEMP VIEW target_current AS
-SELECT * FROM ${target_table}
-WHERE is_current = true
-  AND _pk_hash IN (SELECT _pk_hash FROM transformed_cached);
-
--- 2. Identify changes by comparing _diff_hash
+-- 1. Identify changes by comparing _diff_hash
 CREATE OR REPLACE TEMP VIEW changes AS
 SELECT 
   src.*,
   CASE 
-    WHEN tgt._pk_hash IS NULL THEN 'INSERT'           -- New entity
-    WHEN src._diff_hash != tgt._diff_hash THEN 'UPDATE' -- Changed
+    WHEN tgt._pk_hash IS NULL THEN 'INSERT'
+    WHEN src._diff_hash != tgt._diff_hash THEN 'UPDATE'
     ELSE 'NO_CHANGE'
   END AS _action
 FROM transformed_cached src
-LEFT JOIN target_current tgt
-  ON src._pk_hash = tgt._pk_hash;
+LEFT JOIN target_current tgt ON src._pk_hash = tgt._pk_hash;
 
--- 3. Close old versions (UPDATE)
-MERGE INTO ${target_table} AS tgt
+-- 2. Close old versions
+MERGE INTO target_table AS tgt
 USING (SELECT * FROM changes WHERE _action = 'UPDATE') AS src
 ON tgt._pk_hash = src._pk_hash AND tgt.is_current = true
 WHEN MATCHED THEN UPDATE SET
   tgt.effective_end_date = CURRENT_TIMESTAMP(),
   tgt.is_current = false;
 
--- 4. Insert new versions
-INSERT INTO ${target_table}
-SELECT 
-  *,
-  CURRENT_TIMESTAMP() AS effective_start_date,
-  CAST('9999-12-31 23:59:59' AS TIMESTAMP) AS effective_end_date,
-  true AS is_current
-FROM changes
-WHERE _action IN ('INSERT', 'UPDATE');
+-- 3. Insert new versions
+INSERT INTO target_table
+SELECT *, CURRENT_TIMESTAMP() AS effective_start_date,
+  CAST('9999-12-31' AS TIMESTAMP) AS effective_end_date, true AS is_current
+FROM changes WHERE _action IN ('INSERT', 'UPDATE');
 ```
+
+For `scd2_mode: "passthrough"`, the framework directly inserts records preserving source SCD2 columns.
 
 **Responsibility Summary:**
 
 | Concern | Owner | Location |
 |---------|-------|----------|
-| Watermark + Lookback Filter | Framework | `reader/incremental_reader.py` |
-| Deduplication | Framework | `core/dedup.py` (metadata-driven) |
-| Reference View Registration | Framework | `transform/reference_loader.py` |
-| Variable Substitution | Framework | `transform/sql_engine.py` |
-| Business Logic & Joins | Developer | `conf/sql/<table>_transform.sql` |
-| Hash Computation (`_pk_hash`, `_diff_hash`) | Developer | `conf/sql/<table>_transform.sql` |
-| SCD Merge Execution | Framework | `core/scd1_processor.py`, `core/scd2_processor.py` |
+| Placeholder Resolution | Framework | `transform/placeholder_engine.py` |
+| Hash Key Generation | Framework | `transform/hash_generator.py` (from metadata) |
+| Reference Table Resolution | Framework | `transform/reference_resolver.py` |
+| SCD2 Processing | Framework | `core/scd2_processor.py` (mode-aware) |
+| Business Logic & JOINs | Developer | `query/<table>.sql` |
+| Column Mapping | Developer | `query/<table>.sql` |
 | Watermark Update | Framework | `reader/control_table.py` |
 | Audit Logging | Framework | `audit/audit_logger.py` |
 
@@ -1787,410 +2045,7 @@ __all__ = [
 | JSON Configuration | Human-readable, version-controllable, easy to extend |
 | Per-Table Isolation | One table failure doesn't affect others |
 | Delta Lake | ACID transactions, time travel, schema evolution |
-
----
-
-## 12. Design Revisions (December 2025)
-
-This section documents significant design changes made to improve developer experience, maintainability, and operational flexibility. Each revision includes the rationale for why the change was necessary.
-
-### 12.1 Environment-Agnostic Metadata Configuration
-
-#### Original Design
-Catalog names were embedded directly in the table metadata JSON files:
-```json
-{
-  "source": {
-    "catalog": "ltc_insurance",
-    "schema": "unified_dev",
-    "table": "unified_customer_scd2"
-  }
-}
-```
-
-#### Revised Design
-Catalog names are **removed from metadata JSON** and configured in `databricks.yml`:
-
-**Metadata JSON (catalog-free):**
-```json
-{
-  "source": {
-    "schema": "unified_dev",
-    "table": "unified_customer_scd2"
-  }
-}
-```
-
-**databricks.yml (environment-specific):**
-```yaml
-targets:
-  dev:
-    variables:
-      catalog: ltc_insurance_dev
-  prod:
-    variables:
-      catalog: ltc_insurance_prod
-```
-
-#### Rationale
-1. **Environment Portability**: The same metadata files work across dev/staging/prod without modification.
-2. **Single Source of Truth**: Catalog configuration is centralized in `databricks.yml`, not scattered across table configs.
-3. **Reduced Deployment Errors**: Eliminates risk of deploying dev catalog references to production.
-4. **Databricks Asset Bundle Alignment**: Follows DAB best practices where environment-specific values are in bundle configuration.
-
----
-
-### 12.2 Placeholder-Based SQL Templates
-
-#### Original Design
-Developers wrote complete SQL including source table references and hash key computations:
-```sql
-SELECT
-  SHA2(CONCAT_WS('|', claim_id, source_system), 256) AS _pk_hash,
-  SHA2(CONCAT_WS('|', col1, col2, col3...), 256) AS _diff_hash,
-  claim_id,
-  ...
-FROM bronze.unified_claims_scd2
-LEFT JOIN silver.dim_providers p ON ...
-```
-
-#### Revised Design
-SQL templates use **placeholder syntax** for framework-managed elements:
-
-**Source Table Placeholder:**
-```sql
-FROM {{source}} src
-```
-- Framework resolves to fully qualified table name at runtime
-- Catalog injected from `databricks.yml` environment config
-
-**Reference Table Placeholder:**
-```sql
-LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
-```
-- Framework resolves reference table from `reference_joins` metadata config
-- Enables consistent handling of reference table locations across environments
-
-**Reference Column Placeholder:**
-```sql
-{{adj:adjuster_name}} AS adjuster_name,
-{{adj:adjuster_region}} AS adjuster_region,
-```
-- Makes it explicit that columns come from a joined reference table
-- Framework can validate that referenced columns exist in the reference table
-
-**Hash Key Placeholders:**
-```sql
-SELECT
-  {{_pk_hash}},
-  {{_diff_hash}},
-  src.claim_id,
-  ...
-```
-- Framework generates complete hash expressions at runtime
-- Hash logic is consistent and centralized
-
-#### Rationale
-1. **Separation of Concerns**: SQL focuses purely on business transformation logic; technical concerns (hash generation, table resolution) are handled by framework.
-2. **Readability**: SQL files are clean and easy to understand for business analysts and data engineers.
-3. **Maintainability**: Hash algorithm changes (e.g., MD5 to SHA2) require only framework code changes, not SQL file edits.
-4. **Consistency**: All tables use identical hash canonicalization rules, reducing bugs from inconsistent implementations.
-5. **Validation**: Framework can validate placeholders against metadata before execution.
-
----
-
-### 12.3 Framework-Managed Hash Key Generation
-
-#### Original Design
-Developers were responsible for computing hash keys in their SQL:
-```sql
--- Developer must remember canonicalization rules
-SHA2(CONCAT_WS('|',
-  COALESCE(CAST(claim_id AS STRING), '__NULL__'),
-  COALESCE(TRIM(source_system), '__NULL__')
-), 256) AS _pk_hash
-```
-
-#### Revised Design
-Hash keys are **configured in metadata** and **generated by framework at runtime**:
-
-**Metadata Configuration:**
-```json
-{
-  "hash_keys": {
-    "_pk_hash": {
-      "description": "Entity Hash (Merge Key)",
-      "algorithm": "SHA2-256",
-      "columns": ["claim_id", "source_system"]
-    },
-    "_diff_hash": {
-      "description": "Change Hash (SCD2 Change Detection)",
-      "algorithm": "SHA2-256",
-      "track_columns": ["claimant_id", "policy_number", "claim_type", "claim_amount", ...]
-    }
-  },
-  "source_system_column": "source_system"
-}
-```
-
-**SQL Template (clean):**
-```sql
-SELECT
-  {{_pk_hash}},
-  {{_diff_hash}},
-  src.claim_id,
-  ...
-```
-
-**Framework Runtime Generation:**
-The framework reads `hash_keys` config and generates:
-```sql
-SHA2(CONCAT_WS('|',
-  COALESCE(CAST(src.claim_id AS STRING), '__NULL__'),
-  COALESCE(src.source_system, '__NULL__')
-), 256) AS _pk_hash,
-SHA2(CONCAT_WS('|',
-  COALESCE(CAST(src.claimant_id AS STRING), '__NULL__'),
-  COALESCE(TRIM(src.policy_number), '__NULL__'),
-  ...
-), 256) AS _diff_hash
-```
-
-#### Rationale
-1. **Error Reduction**: Developers cannot forget NULL handling, TRIM, or type casting - framework enforces rules.
-2. **Algorithm Flexibility**: Hash algorithm can be changed centrally (e.g., for collision resistance requirements).
-3. **Audit Trail**: Metadata clearly documents which columns contribute to each hash.
-4. **Testing**: Hash generation logic is unit-testable in isolation.
-5. **SQL Cleanliness**: Removes ~20 lines of boilerplate from each SQL file.
-
----
-
-### 12.4 Dual-Mode SCD2 Processing
-
-#### Original Design
-Single SCD2 mode - framework always managed history tracking:
-```json
-{
-  "load_strategy": {
-    "type": "scd2",
-    "business_keys": ["claim_id"]
-  }
-}
-```
-
-#### Revised Design
-**Dual SCD2 mode** supporting different behaviors for historical vs. incremental loads:
-
-```json
-{
-  "load_strategy": {
-    "type": "scd2",
-    "business_keys": ["claim_id"],
-    "scd2_mode": {
-      "historical": "passthrough",
-      "incremental": "framework_managed"
-    },
-    "scd2_columns": {
-      "effective_start_date": "effective_start_date",
-      "effective_end_date": "effective_end_date",
-      "is_current": "is_current"
-    }
-  }
-}
-```
-
-**Mode Behaviors:**
-
-| Mode | `scd2_mode` | Behavior |
-|------|-------------|----------|
-| Historical Load | `passthrough` | Preserve `effective_start_date`, `effective_end_date`, `is_current` from source. Source Bronze layer already has SCD2 history. |
-| Incremental/Kafka | `framework_managed` | Framework detects changes using `_diff_hash` and manages SCD2 columns. Source messages don't have SCD2 metadata. |
-
-#### Rationale
-1. **Bronze Layer Reality**: Our Lakeflow Streaming Tables (Bronze) already implement SCD Type 2. For historical/batch loads, we want to **preserve that history** rather than re-track it.
-2. **Kafka Ingestion**: Real-time Kafka events don't have SCD2 columns. Framework must detect changes and create history at the Silver layer.
-3. **Flexibility**: Same table can be loaded via batch (passthrough) or streaming (managed) depending on the data source.
-4. **Consistency**: Avoids conflicting SCD2 timestamps when source already has them.
-5. **Migration Support**: Allows historical backfill from source with existing history, then switch to incremental mode.
-
----
-
-### 12.5 Soft Delete Indicator Column
-
-#### Original Design
-No standard handling for deleted records.
-
-#### Revised Design
-All SCD2 tables include a `deleted_ind` column:
-
-**SQL Template:**
-```sql
-coalesce(src.deleted_ind, false) AS deleted_ind
-```
-
-**Behavior:**
-- If source provides `deleted_ind`, it's passed through
-- If source doesn't have it, defaults to `false`
-- Enables tracking of logically deleted records without physical deletion
-
-#### Rationale
-1. **Audit Compliance**: Regulated industries (insurance) require tracking of deleted records.
-2. **No Physical Deletes**: Delta Lake best practice - mark as deleted rather than remove rows.
-3. **Point-in-Time Accuracy**: Historical queries show records that existed at a given time, even if later deleted.
-4. **Source Flexibility**: Works whether source system tracks deletes or not.
-
----
-
-### 12.6 Reference Table Architecture
-
-#### Original Design
-Reference tables were managed via framework-registered views with filtering:
-```json
-{
-  "reference_tables": [
-    {
-      "alias": "ref_providers",
-      "table": "silver.dim_providers",
-      "filter": "is_current = true"
-    }
-  ]
-}
-```
-
-#### Revised Design
-Reference tables are **created directly in the SDL schema** with explicit configuration in metadata:
-
-**Fixture Scripts (`fixtures/` folder):**
-```sql
--- fixtures/adjuster_lookup.sql
-CREATE TABLE IF NOT EXISTS ${catalog}.standardized_data_layer.adjuster_lookup (
-  adjuster_id STRING,
-  adjuster_name STRING,
-  adjuster_region STRING,
-  adjuster_level STRING,
-  is_active BOOLEAN
-);
-
-INSERT OVERWRITE ${catalog}.standardized_data_layer.adjuster_lookup VALUES
-  ('ADJ001', 'John Smith', 'Northeast', 'Senior', true),
-  ...
-```
-
-**Metadata Configuration:**
-```json
-{
-  "reference_joins": [
-    {
-      "table": "adjuster_lookup",
-      "schema": "standardized_data_layer",
-      "alias": "adj",
-      "join_type": "LEFT",
-      "join_condition": "src.adjuster_id = adj.adjuster_id"
-    }
-  ]
-}
-```
-
-**SQL Template:**
-```sql
-FROM {{source}} src
-LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
-```
-
-#### Rationale
-1. **Simplicity**: Reference tables are standard Delta tables, not framework-managed abstractions.
-2. **Direct Access**: Analysts can query reference tables directly for validation.
-3. **Version Control**: Fixture scripts are versioned with the codebase.
-4. **Environment Parity**: Same reference data structure across dev/staging/prod.
-5. **No Runtime Overhead**: Tables exist persistently; no temp view creation on each run.
-
----
-
-### 12.7 Directory Structure for Configuration
-
-#### Original Design
-Single `conf/` directory with mixed configurations.
-
-#### Revised Design
-Clear separation by artifact type:
-
-```
-curation_framework/
-├── databricks.yml              # Bundle config (catalog per environment)
-├── metadata/
-│   └── sdl/
-│       └── claims/             # Domain-organized metadata
-│           ├── customer.json
-│           └── claims.json
-├── query/                      # SQL transformation templates
-│   ├── customer.sql
-│   └── claims.sql
-├── fixtures/                   # Reference table DDL & data
-│   ├── adjuster_lookup.sql
-│   └── state_lookup.sql
-└── resources/                  # Databricks job/pipeline definitions
-    └── *.yml
-```
-
-#### Rationale
-1. **Discoverability**: Clear where to find each type of artifact.
-2. **Domain Organization**: Metadata organized by business domain (`sdl/claims/`).
-3. **Separation**: SQL templates separate from metadata, fixtures separate from both.
-4. **Scalability**: Structure supports adding new domains (e.g., `sdl/policies/`, `sdl/providers/`).
-
----
-
-### 12.8 Summary of Placeholder Syntax
-
-| Placeholder | Purpose | Resolved From |
-|-------------|---------|---------------|
-| `{{source}}` | Fully qualified source table | `source.schema` + `source.table` + catalog from env |
-| `{{ref:table_name}}` | Fully qualified reference table | `reference_joins[].schema` + `reference_joins[].table` |
-| `{{alias:column}}` | Column from reference table | Reference table alias + column name |
-| `{{_pk_hash}}` | Entity hash expression | `hash_keys._pk_hash.columns` |
-| `{{_diff_hash}}` | Change detection hash expression | `hash_keys._diff_hash.track_columns` |
-
-**Example Complete SQL Template:**
-```sql
-SELECT
-  {{_pk_hash}},
-  {{_diff_hash}},
-  src.claim_id,
-  src.claimant_id AS customer_id,
-  src.policy_number,
-  src.adjuster_id,
-  {{adj:adjuster_name}} AS adjuster_name,
-  {{adj:adjuster_region}} AS adjuster_region,
-  to_utc_timestamp(src.event_timestamp, 'America/New_York') AS event_at_utc,
-  src.source_system,
-  coalesce(src.deleted_ind, false) AS deleted_ind,
-  src.effective_start_date,
-  src.effective_end_date,
-  src.is_current
-FROM {{source}} src
-LEFT JOIN {{ref:adjuster_lookup}} adj ON src.adjuster_id = adj.adjuster_id
-```
-
----
-
-### 12.9 Migration Notes
-
-For existing implementations migrating to the revised design:
-
-1. **Metadata Migration**:
-   - Remove `catalog` from `source` and `target` sections
-   - Add `hash_keys` section with `_pk_hash` and `_diff_hash` configuration
-   - Add `source_system_column` explicitly
-   - Add `scd2_mode` to `load_strategy`
-
-2. **SQL Migration**:
-   - Replace hardcoded table names with `{{source}}` and `{{ref:*}}`
-   - Remove hash key SQL expressions, replace with `{{_pk_hash}}` and `{{_diff_hash}}`
-   - Add `deleted_ind` column
-   - Ensure SCD2 columns are included for passthrough mode
-
-3. **Framework Changes**:
-   - Implement placeholder resolution engine
-   - Implement hash key generation from metadata
-   - Implement dual SCD2 mode handling
-   - Update reference table handling
+| Placeholder-Based SQL | Clean separation between business logic and infrastructure concerns |
+| Framework-Managed Hashes | Consistent canonicalization, error-free hash generation |
+| Dual SCD2 Mode | Flexibility for historical loads vs. incremental processing |
+| Environment in Bundle | Single source of truth for catalog configuration |
