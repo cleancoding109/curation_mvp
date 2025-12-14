@@ -959,11 +959,11 @@ version = "1.0.0"
 
 [project.scripts]
 # This creates the entry point for python_wheel_task
-main = "curation_framework.main:main"
+job_executor = "curation_framework.job_executor:main"
 
 [project.entry-points."databricks"]
-# Alternative: use databricks-specific entry point
-main = "curation_framework.main:main"
+# Databricks-specific entry point (same as scripts)
+job_executor = "curation_framework.job_executor:main"
 ```
 
 **DAB Wheel Build:**
@@ -1114,18 +1114,14 @@ resources:
         quartz_cron_expression: "0 0 * * * ?"  # Hourly
         timezone_id: "America/New_York"
       
-      # Wheel is built and uploaded by DAB
-      python_wheel_task:
-        package_name: "curation_framework"
-        entry_point: "main"  # Calls curation_framework.main:main()
-      
       tasks:
         # Sub-Domain 1: Party
         - task_key: "party_claimants"
           python_wheel_task:
             package_name: "curation_framework"
-            entry_point: "main"
+            entry_point: "job_executor"  # Calls job_executor:main()
             parameters:
+              - "--pipeline_type=lakeflow_curation"
               - "--table_name=silver_claimants"
         
         - task_key: "party_providers"
@@ -1133,8 +1129,9 @@ resources:
             - task_key: "party_claimants"
           python_wheel_task:
             package_name: "curation_framework"
-            entry_point: "main"
+            entry_point: "job_executor"
             parameters:
+              - "--pipeline_type=lakeflow_curation"
               - "--table_name=silver_providers"
         
         - task_key: "party_policies"
@@ -1142,8 +1139,9 @@ resources:
             - task_key: "party_providers"
           python_wheel_task:
             package_name: "curation_framework"
-            entry_point: "main"
+            entry_point: "job_executor"
             parameters:
+              - "--pipeline_type=lakeflow_curation"
               - "--table_name=silver_policies"
         
         # Sub-Domain 2: Claims (depends on Party completion)
@@ -1152,8 +1150,9 @@ resources:
             - task_key: "party_policies"
           python_wheel_task:
             package_name: "curation_framework"
-            entry_point: "main"
+            entry_point: "job_executor"
             parameters:
+              - "--pipeline_type=lakeflow_curation"
               - "--table_name=silver_claims"
         
         - task_key: "claims_claim_lines"
@@ -1161,8 +1160,9 @@ resources:
             - task_key: "claims_claims"
           python_wheel_task:
             package_name: "curation_framework"
-            entry_point: "main"
+            entry_point: "job_executor"
             parameters:
+              - "--pipeline_type=lakeflow_curation"
               - "--table_name=silver_claim_lines"
         
         # Sub-Domain 3: Financials (depends on Claims completion)
@@ -1171,8 +1171,9 @@ resources:
             - task_key: "claims_claim_lines"
           python_wheel_task:
             package_name: "curation_framework"
-            entry_point: "main"
+            entry_point: "job_executor"
             parameters:
+              - "--pipeline_type=lakeflow_curation"
               - "--table_name=silver_payments"
 ```
 
@@ -1252,12 +1253,18 @@ The framework follows a **layered modular architecture** with clear separation o
 
 ### 10.1 Package Structure
 
-**Entry Point**: `curation_framework.main:main()` - invoked by `python_wheel_task` in DAB jobs.
+**Entry Point**: `curation_framework.job_executor:main()` - invoked by `python_wheel_task` in DAB jobs.
 
 ```
 src/curation_framework/
 ├── __init__.py                    # Package exports & public API
-├── main.py                        # Wheel entry point (python_wheel_task calls this)
+├── job_executor.py                # ⭐ Main entry point (dispatches to pipeline by type)
+│
+├── pipelines/                     # Pipeline Implementations
+│   ├── __init__.py
+│   ├── base_pipeline.py           # Abstract base pipeline class
+│   ├── lakeflow_curation_pipeline.py  # ⭐ Bronze-to-Silver curation pipeline
+│   └── (future: other pipeline types)
 │
 ├── core/                          # Core Processing Modules
 │   ├── __init__.py
@@ -1303,9 +1310,135 @@ src/curation_framework/
     └── datetime_utils.py          # Timezone & timestamp helpers
 ```
 
-### 10.2 Module Responsibilities
+### 10.2 Entry Point Architecture
 
-#### 10.2.1 Core Layer (`core/`)
+The framework uses a **dispatcher pattern** where `job_executor.py` routes execution to the appropriate pipeline based on `pipeline_type`.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Entry Point Architecture                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  DAB Job Task                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  python_wheel_task:                                                  │    │
+│  │    entry_point: job_executor                                         │    │
+│  │    parameters:                                                       │    │
+│  │      - "--pipeline_type=lakeflow_curation"                           │    │
+│  │      - "--table_name=silver_claimants"                               │    │
+│  │      - "--config_path=conf/tables_config.json"                       │    │
+│  └──────────────────────────────┬──────────────────────────────────────┘    │
+│                                 │                                            │
+│                                 ▼                                            │
+│  job_executor.py                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  1. Parse CLI arguments (--pipeline_type, --table_name, etc.)       │    │
+│  │  2. Load configuration                                               │    │
+│  │  3. Dispatch to pipeline based on pipeline_type                      │    │
+│  │  4. Return exit code                                                 │    │
+│  └──────────────────────────────┬──────────────────────────────────────┘    │
+│                                 │                                            │
+│                   ┌─────────────┴─────────────┐                             │
+│                   │    pipeline_type?         │                             │
+│                   └─────────────┬─────────────┘                             │
+│                                 │                                            │
+│         ┌───────────────────────┼───────────────────────┐                   │
+│         │                       │                       │                   │
+│         ▼                       ▼                       ▼                   │
+│  ┌──────────────┐       ┌──────────────┐       ┌──────────────┐            │
+│  │ lakeflow_    │       │ (future)     │       │ (future)     │            │
+│  │ curation     │       │ gold_agg     │       │ data_quality │            │
+│  └──────┬───────┘       └──────────────┘       └──────────────┘            │
+│         │                                                                    │
+│         ▼                                                                    │
+│  lakeflow_curation_pipeline.py                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Bronze → Silver curation with:                                      │    │
+│  │  - Watermark + Lookback incremental read                            │    │
+│  │  - Metadata-driven deduplication                                     │    │
+│  │  - SQL transformation execution                                      │    │
+│  │  - SCD1/SCD2 merge                                                   │    │
+│  │  - Control table update                                              │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 10.2.1 job_executor.py
+
+**Role**: Main entry point invoked by Databricks `python_wheel_task`. Parses arguments and dispatches to the appropriate pipeline.
+
+**Responsibilities:**
+- Parse CLI arguments (`--pipeline_type`, `--table_name`, `--config_path`, etc.)
+- Initialize SparkSession and logging
+- Load and validate configuration
+- Dispatch to registered pipeline based on `pipeline_type`
+- Handle top-level exceptions and return appropriate exit codes
+- Write final audit log entry
+
+**Supported Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--pipeline_type` | Yes | Pipeline to execute (e.g., `lakeflow_curation`) |
+| `--table_name` | Yes | Target table to process |
+| `--config_path` | No | Path to config file (default: `conf/tables_config.json`) |
+| `--run_id` | No | Unique run identifier (auto-generated if not provided) |
+
+**Pipeline Registry:**
+
+| `pipeline_type` Value | Pipeline Class | Description |
+|-----------------------|----------------|-------------|
+| `lakeflow_curation` | `LakeflowCurationPipeline` | Bronze → Silver batch curation |
+| _(future)_ `gold_aggregation` | `GoldAggregationPipeline` | Silver → Gold aggregations |
+| _(future)_ `data_quality` | `DataQualityPipeline` | Data quality checks |
+
+#### 10.2.2 pipelines/base_pipeline.py
+
+**Role**: Abstract base class defining the pipeline contract.
+
+**Interface:**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  class BasePipeline(ABC):                                       │
+│                                                                  │
+│    @abstractmethod                                              │
+│    def run(self, table_config: TableConfig) -> PipelineResult   │
+│                                                                  │
+│    @property                                                     │
+│    @abstractmethod                                              │
+│    def pipeline_type(self) -> str                               │
+│                                                                  │
+│    def validate_config(self, config: TableConfig) -> bool       │
+│    def get_metrics(self) -> dict                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 10.2.3 pipelines/lakeflow_curation_pipeline.py
+
+**Role**: Implements the Bronze → Silver curation pipeline. This is the primary pipeline for LTC Claims processing.
+
+**Execution Flow:**
+1. Read from Bronze with watermark + lookback
+2. Apply metadata-driven deduplication
+3. Register `source_deduped` and reference temp views
+4. Execute developer transformation SQL
+5. Validate output schema (`_pk_hash`, `_diff_hash`)
+6. Execute SCD1 or SCD2 merge
+7. Update control table watermark
+8. Write audit log
+
+**Dependencies:**
+- `core/dedup.py` - Deduplication logic
+- `core/scd1_processor.py` or `core/scd2_processor.py` - Merge logic
+- `io/reader.py` - Incremental source reading
+- `io/control_table.py` - Watermark management
+- `transform/sql_engine.py` - SQL execution
+- `transform/reference_loader.py` - Reference table registration
+
+### 10.3 Module Responsibilities
+
+#### 10.3.1 Core Layer (`core/`)
 
 | Module | Responsibility |
 |--------|---------------|

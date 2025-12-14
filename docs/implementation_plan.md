@@ -109,17 +109,18 @@
 
 | Task | Description | Status |
 |------|-------------|--------|
-| 9.1 | Create `core/` package with `processor.py`, `scd1_processor.py`, `scd2_processor.py`, `dedup.py` | ⏳ Pending |
-| 9.2 | Create `io/` package with `reader.py`, `writer.py`, `control_table.py` | ⏳ Pending |
-| 9.3 | Create `transform/` package with `sql_engine.py`, `hash_generator.py`, `reference_loader.py` | ⏳ Pending |
-| 9.4 | Create `orchestration/` package with `orchestrator.py`, `dependency_resolver.py`, `parallel_executor.py` | ⏳ Pending |
-| 9.5 | Create `config/` package with `loader.py`, `validator.py`, `schema.py` | ⏳ Pending |
-| 9.6 | Create `observability/` package with `logger.py`, `metrics.py`, `audit.py` | ⏳ Pending |
-| 9.7 | Create `utils/` package with `spark_utils.py`, `delta_utils.py`, `datetime_utils.py` | ⏳ Pending |
-| 9.8 | Migrate existing `silver_processor.py` logic to new modular structure | ⏳ Pending |
-| 9.9 | Update `main.py` to use new orchestration module | ⏳ Pending |
-| 9.10 | Update `__init__.py` with public API exports | ⏳ Pending |
-| 9.11 | Create tests mirroring new package structure | ⏳ Pending |
+| 9.1 | Create `job_executor.py` entry point with CLI argument parsing and pipeline dispatch | ⏳ Pending |
+| 9.2 | Create `pipelines/` package with `base_pipeline.py` and `lakeflow_curation_pipeline.py` | ⏳ Pending |
+| 9.3 | Create `core/` package with `processor.py`, `scd1_processor.py`, `scd2_processor.py`, `dedup.py` | ⏳ Pending |
+| 9.4 | Create `io/` package with `reader.py`, `writer.py`, `control_table.py` | ⏳ Pending |
+| 9.5 | Create `transform/` package with `sql_engine.py`, `hash_generator.py`, `reference_loader.py` | ⏳ Pending |
+| 9.6 | Create `orchestration/` package with `orchestrator.py`, `dependency_resolver.py`, `parallel_executor.py` | ⏳ Pending |
+| 9.7 | Create `config/` package with `loader.py`, `validator.py`, `schema.py` | ⏳ Pending |
+| 9.8 | Create `observability/` package with `logger.py`, `metrics.py`, `audit.py` | ⏳ Pending |
+| 9.9 | Create `utils/` package with `spark_utils.py`, `delta_utils.py`, `datetime_utils.py` | ⏳ Pending |
+| 9.10 | Migrate existing `silver_processor.py` logic to new modular structure | ⏳ Pending |
+| 9.11 | Update `__init__.py` with public API exports | ⏳ Pending |
+| 9.12 | Create tests mirroring new package structure | ⏳ Pending |
 
 ## 3. File Structure (Modular Architecture)
 
@@ -152,7 +153,12 @@ curation_framework/
 │   ├── notebook.ipynb                # Interactive notebook
 │   └── curation_framework/           # Python package (Modular)
 │       ├── __init__.py               # Package exports & public API
-│       ├── main.py                   # Entry point (CLI & Job execution)
+│       ├── job_executor.py           # ⭐ Main entry point (pipeline dispatch)
+│       │
+│       ├── pipelines/                # Pipeline Implementations
+│       │   ├── __init__.py
+│       │   ├── base_pipeline.py      # Abstract base pipeline
+│       │   └── lakeflow_curation_pipeline.py  # ⭐ Bronze→Silver curation
 │       │
 │       ├── core/                     # Core Processing Modules
 │       │   ├── __init__.py
