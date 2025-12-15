@@ -1,1 +1,21 @@
-"""\nState Package\n\nWatermark and state management for incremental processing.\n"""\n\nfrom state.watermark import (\n    get_watermark,\n    update_watermark,\n    get_max_watermark_from_df,\n    create_watermark_table,\n    WatermarkManager,\n)\n\n__all__ = [\n    "get_watermark",\n    "update_watermark",\n    "get_max_watermark_from_df",\n    "create_watermark_table",\n    "WatermarkManager",\n]\n
+"""
+State Package
+
+Watermark and state management for incremental processing.
+"""
+
+from state.watermark import (
+    get_watermark,
+    update_watermark,
+    get_max_watermark_from_df,
+    create_watermark_table,
+    WatermarkManager,
+)
+
+__all__ = [
+    "get_watermark",
+    "update_watermark",
+    "get_max_watermark_from_df",
+    "create_watermark_table",
+    "WatermarkManager",
+]
