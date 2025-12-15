@@ -80,7 +80,16 @@ class SCD2Strategy(LoadStrategy):
         start_col = self.scd2_columns.get("effective_start_date", "effective_start_date")
         end_col = self.scd2_columns.get("effective_end_date", "effective_end_date")
         curr_col = self.scd2_columns.get("is_current", "is_current")
-        source_ts_col = self.metadata.get("source_col", "event_timestamp")
+        
+        # Issue #3 & #4: Fix source timestamp column extraction
+        source_ts_col = None
+        for col in self.metadata.get("columns", []):
+            if col.get("transform") == "to_utc":
+                source_ts_col = col.get("target_col")
+                break
+        
+        if not source_ts_col:
+            source_ts_col = "event_at_utc" # Default fallback
         
         # Use source timestamp if available, else current_timestamp
         if source_ts_col in df.columns:
@@ -100,55 +109,52 @@ class SCD2Strategy(LoadStrategy):
         Managed SCD2 - Change detection and Merge.
         """
         # Config
-        pk_hash_col = self.metadata.get("_pk_hash", "_pk_hash")
-        diff_hash_col = self.metadata.get("_diff_hash", "_diff_hash")
-        source_ts_col = self.metadata.get("source_col", "event_timestamp")
+        # Issue #2: Fix hash column extraction (using defaults as keys are standard)
+        pk_hash_col = "_pk_hash"
+        diff_hash_col = "_diff_hash"
+        
+        # Issue #3: Fix source timestamp column extraction
+        source_ts_col = None
+        for col in self.metadata.get("columns", []):
+            if col.get("transform") == "to_utc":
+                source_ts_col = col.get("target_col")
+                break
+        
+        if not source_ts_col:
+            source_ts_col = "event_at_utc" # Default fallback
         
         start_col = self.scd2_columns.get("effective_start_date", "effective_start_date")
         end_col = self.scd2_columns.get("effective_end_date", "effective_end_date")
         curr_col = self.scd2_columns.get("is_current", "is_current")
         
-        # 1. Get Target Data (Current records only)
-        target_df = self.spark.table(target_table).filter(F.col(curr_col) == True)
+        # Issue #5: Use SQL for better optimization (avoid full table scan if possible)
+        # and Issue #1: Avoid redundant join by selecting target key
         
-        # 2. Identify Changes
-        # Join Source and Target on PK Hash
-        # We need to alias to avoid ambiguity
+        df.createOrReplaceTempView("source_view")
         
-        source_alias = df.alias("source")
-        target_alias = target_df.alias("target")
+        changes_sql = f"""
+        SELECT 
+            s.*,
+            t.{pk_hash_col} as target_pk_hash
+        FROM source_view s
+        LEFT JOIN {target_table} t 
+          ON s.{pk_hash_col} = t.{pk_hash_col} 
+          AND t.{curr_col} = true
+        WHERE t.{pk_hash_col} IS NULL 
+           OR s.{diff_hash_col} != t.{diff_hash_col}
+        """
         
-        cond = F.col(f"source.{pk_hash_col}") == F.col(f"target.{pk_hash_col}")
-        
-        # Full set of columns from source
-        source_cols = [F.col(f"source.{c}") for c in df.columns]
-        
-        # Join
-        joined = source_alias.join(target_alias, cond, "left")
-        
-        # Filter for New or Changed
-        # New: target key is null
-        # Changed: diff hash is different
-        changes = joined.filter(
-            F.col(f"target.{pk_hash_col}").isNull() | 
-            (F.col(f"source.{diff_hash_col}") != F.col(f"target.{diff_hash_col}"))
-        ).select(*source_cols)
-        
-        # Cache changes if large? For now, no.
+        changes = self.spark.sql(changes_sql)
         
         # 3. Prepare Staged Data for MERGE
         # We need to construct a dataset that has:
         # - Rows to CLOSE (Update): merge_key = pk_hash
         # - Rows to INSERT (New): merge_key = NULL
         
-        # Updates (Close old)
-        updates_df = changes.alias("c").join(
-            target_df.alias("t"),
-            F.col(f"c.{pk_hash_col}") == F.col(f"t.{pk_hash_col}")
-        ).select(
-            F.col(f"c.{pk_hash_col}").alias("merge_key"),
-            *[F.col(f"c.{c}") for c in df.columns]
-        )
+        # Updates (Close old) - where target_pk_hash is NOT NULL (meaning it exists in target)
+        updates_df = changes.filter(F.col("target_pk_hash").isNotNull()) \
+            .withColumn("merge_key", F.col("target_pk_hash")) \
+            .drop("target_pk_hash")
         
         # Inserts (New versions)
         # Filter out soft-deletes from being inserted as new versions
@@ -160,10 +166,8 @@ class SCD2Strategy(LoadStrategy):
                 (F.lower(F.col("deleted_ind").cast("string")) != "true")
             )
             
-        inserts_df = inserts_source.select(
-            F.lit(None).alias("merge_key"),
-            "*"
-        )
+        inserts_df = inserts_source.withColumn("merge_key", F.lit(None).cast("string")) \
+            .drop("target_pk_hash")
         
         # Union
         # allowMissingColumns=True helps if types need alignment, though schemas should match
