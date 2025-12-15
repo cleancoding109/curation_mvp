@@ -142,6 +142,139 @@ def write_truncate_insert(
     write_insert(df, target_table, mode="overwrite")
 
 
+def write_scd2(
+    spark: SparkSession,
+    df: DataFrame,
+    target_table: str,
+    merge_keys: List[str],
+    scd2_columns: Dict[str, str]
+):
+    """
+    Write DataFrame to target table using SCD Type 2 (Merge-on-Read).
+    
+    Args:
+        spark: SparkSession instance
+        df: DataFrame to write (Source)
+        target_table: Fully qualified target table name
+        merge_keys: Business keys to join on
+        scd2_columns: Dictionary mapping logical names to physical columns
+                      {'effective_start_date': 'start_col', 
+                       'effective_end_date': 'end_col', 
+                       'is_current': 'curr_col'}
+    """
+    from pyspark.sql import functions as F
+    
+    # Extract column names
+    start_col = scd2_columns.get("effective_start_date", "effective_start_date")
+    end_col = scd2_columns.get("effective_end_date", "effective_end_date")
+    curr_col = scd2_columns.get("is_current", "is_current")
+    
+    # Register source as temp view
+    source_view = "_scd2_source"
+    df.createOrReplaceTempView(source_view)
+    
+    # 1. Identify rows to UPDATE (close old records)
+    # We need to join source with target to find records that exist and are current
+    # but have changed (different hash or just new version)
+    # For simplicity in this framework, we assume the source contains ONLY changed/new records
+    # or that we want to update ANY match found in source.
+    
+    # Construct the merge key condition
+    join_cond = " AND ".join([f"target.{k} = source.{k}" for k in merge_keys])
+    
+    # Prepare the staged update DataFrame
+    # We use a UNION approach:
+    # 1. Rows to INSERT (New versions) -> mergeKey = NULL
+    # 2. Rows to UPDATE (Close old versions) -> mergeKey = business_key
+    
+    # We need to handle this carefully. The standard pattern is:
+    # MERGE INTO target
+    # USING (
+    #   SELECT key, ... as mergeKey, ... FROM source  -- For closing old
+    #   UNION ALL
+    #   SELECT NULL as mergeKey, ... FROM source      -- For inserting new
+    # ) staged_updates
+    # ON target.key = staged_updates.mergeKey
+    
+    # However, we only want to close the OLD record if it is currently active (is_current=true)
+    
+    # Let's build the SQL dynamically
+    
+    # Columns to select from source
+    source_cols = df.columns
+    select_cols = ", ".join([f"source.{c}" for c in source_cols])
+    
+    # Merge Key Selection
+    # If we are closing a record, we match on keys.
+    # If we are inserting, we force a non-match (NULL).
+    
+    # We need a unique key for the merge condition to avoid ambiguous matches if source has dupes
+    # (Source shouldn't have dupes on business key for one batch)
+    
+    merge_key_select = ", ".join([f"source.{k} as merge_{k}" for k in merge_keys])
+    null_key_select = ", ".join([f"NULL as merge_{k}" for k in merge_keys])
+    
+    staged_view = "_scd2_staged"
+    
+    staged_sql = f"""
+    CREATE OR REPLACE TEMP VIEW {staged_view} AS
+    -- 1. Rows to UPDATE (Close existing current records)
+    SELECT 
+        {merge_key_select},
+        {select_cols}
+    FROM {source_view} source
+    
+    UNION ALL
+    
+    -- 2. Rows to INSERT (New versions)
+    SELECT 
+        {null_key_select},
+        {select_cols}
+    FROM {source_view} source
+    """
+    
+    spark.sql(staged_sql)
+    
+    # Build the MERGE statement
+    
+    # ON condition: Match on generated merge keys AND target is current
+    on_clause = " AND ".join([f"target.{k} = staged.merge_{k}" for k in merge_keys])
+    on_clause += f" AND target.{curr_col} = true"
+    
+    # UPDATE clause (Close record)
+    # Set end_date to source's start_date (which is the new version's start)
+    # Set is_current to false
+    update_clause = f"""
+        UPDATE SET 
+            target.{curr_col} = false,
+            target.{end_col} = staged.{start_col}
+    """
+    
+    # INSERT clause (New record)
+    insert_cols_str = ", ".join(source_cols)
+    insert_vals_str = ", ".join([f"staged.{c}" for c in source_cols])
+    insert_clause = f"""
+        INSERT ({insert_cols_str}) VALUES ({insert_vals_str})
+    """
+    
+    merge_sql = f"""
+    MERGE INTO {target_table} AS target
+    USING {staged_view} AS staged
+    ON {on_clause}
+    WHEN MATCHED THEN {update_clause}
+    WHEN NOT MATCHED THEN {insert_clause}
+    """
+    
+    logger.info(f"Executing SCD2 MERGE into {target_table}")
+    spark.sql(merge_sql)
+    
+    # Cleanup
+    spark.catalog.dropTempView(source_view)
+    spark.catalog.dropTempView(staged_view)
+    
+    logger.info(f"SCD2 MERGE completed to {target_table}")
+
+
 class DeltaWriter:
     """
     Delta writer with environment context.
@@ -242,3 +375,30 @@ class DeltaWriter:
         """
         target = self.get_target_table(metadata)
         write_truncate_insert(df, target)
+
+    def scd2(
+        self,
+        df: DataFrame,
+        metadata: Dict[str, Any],
+        scd2_columns: Dict[str, str] = None
+    ):
+        """
+        Write using SCD Type 2.
+        
+        Args:
+            df: DataFrame to write
+            metadata: Table metadata dictionary
+            scd2_columns: SCD2 column mapping
+        """
+        target = self.get_target_table(metadata)
+        
+        load_strategy = metadata.get("load_strategy", {})
+        merge_keys = load_strategy.get("business_keys", [])
+        
+        if not merge_keys:
+            raise ValueError("business_keys required for SCD2 operation")
+            
+        if scd2_columns is None:
+            scd2_columns = load_strategy.get("scd2_columns", {})
+            
+        write_scd2(self.spark, df, target, merge_keys, scd2_columns)

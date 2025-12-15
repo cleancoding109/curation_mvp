@@ -18,19 +18,18 @@ logger = get_logger(__name__)
 # Registry of available load strategies
 _STRATEGY_REGISTRY: Dict[str, Type[LoadStrategy]] = {}
 
+from load_strategy.insert_only import InsertOnlyStrategy
+from load_strategy.delete_insert import DeleteInsertStrategy
+from load_strategy.truncate_insert import TruncateInsertStrategy
+from load_strategy.scd2 import SCD2Strategy
 
-def register_strategy(name: str):
-    """
-    Decorator to register a load strategy class.
-    
-    Args:
-        name: Strategy name (e.g., "scd2", "insert_only")
-    """
-    def decorator(cls: Type[LoadStrategy]):
-        _STRATEGY_REGISTRY[name.lower()] = cls
-        cls.name = name.lower()
-        return cls
-    return decorator
+# Register strategies
+# Note: In a larger framework, this might be done via dynamic import or decorators
+_STRATEGY_REGISTRY["insert_only"] = InsertOnlyStrategy
+_STRATEGY_REGISTRY["delete_insert"] = DeleteInsertStrategy
+_STRATEGY_REGISTRY["truncate_insert"] = TruncateInsertStrategy
+_STRATEGY_REGISTRY["scd2"] = SCD2Strategy
+
 
 
 def get_strategy(
@@ -87,7 +86,13 @@ def get_strategy_from_metadata(
     Returns:
         LoadStrategy instance
     """
-    strategy_name = metadata.get("load_strategy", "scd2")
+    # Handle both string and dict formats for load_strategy
+    strategy_config = metadata.get("load_strategy", "scd2")
+    if isinstance(strategy_config, dict):
+        strategy_name = strategy_config.get("type", "scd2")
+    else:
+        strategy_name = strategy_config
+        
     return get_strategy(strategy_name, spark, env_config, metadata)
 
 
