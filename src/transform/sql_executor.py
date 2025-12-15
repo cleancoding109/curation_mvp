@@ -103,6 +103,8 @@ class SqlExecutor:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup."""
         self.cleanup_temp_views()
+        # Return False to propagate exceptions (or True to suppress them)
+        return False
     
     def execute(self, sql: str, description: str = "SQL query") -> DataFrame:
         """
