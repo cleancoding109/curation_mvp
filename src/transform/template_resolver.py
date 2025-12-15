@@ -17,8 +17,8 @@ logger = get_logger(__name__)
 
 # Regex patterns for placeholder extraction
 PLACEHOLDER_PATTERN = re.compile(r"\{\{([^}]+)\}\}")
-REF_PATTERN = re.compile(r"ref:(\w+)")
-ALIAS_PATTERN = re.compile(r"alias:(\w+)")
+REF_PATTERN = re.compile(r"ref:([\w\.]+)")
+ALIAS_PATTERN = re.compile(r"alias:([\w\.]+)")
 
 
 def resolve_source_placeholder(
@@ -77,12 +77,20 @@ def resolve_ref_placeholder(
     Returns:
         Fully qualified reference table name
     """
-    reference_joins = metadata.get("reference_joins", {})
+    reference_joins = metadata.get("reference_joins", [])
     
-    if ref_name in reference_joins:
-        ref_config = reference_joins[ref_name]
-        ref_schema = ref_config.get("schema", "standardized_data_layer")
-        return env_config.get_fully_qualified_table(ref_schema, ref_name)
+    # Issue #3: Handle reference_joins as list of dicts per design doc
+    if isinstance(reference_joins, list):
+        for join in reference_joins:
+            if join.get("table_name") == ref_name:
+                ref_schema = join.get("schema", "standardized_data_layer")
+                return env_config.get_fully_qualified_table(ref_schema, ref_name)
+    elif isinstance(reference_joins, dict):
+        # Legacy support
+        if ref_name in reference_joins:
+            ref_config = reference_joins[ref_name]
+            ref_schema = ref_config.get("schema", "standardized_data_layer")
+            return env_config.get_fully_qualified_table(ref_schema, ref_name)
     
     # Default: assume reference tables are in standardized_data_layer
     return env_config.get_fully_qualified_table("standardized_data_layer", ref_name)

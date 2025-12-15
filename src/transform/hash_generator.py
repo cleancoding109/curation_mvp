@@ -16,7 +16,7 @@ def canonicalize_column(column: str, alias: str = None) -> str:
     """
     Generate canonicalized column expression.
     
-    Handles NULL values by replacing with empty string,
+    Handles NULL values by replacing with '__NULL__',
     trims whitespace, and converts to uppercase for consistency.
     
     Args:
@@ -27,7 +27,8 @@ def canonicalize_column(column: str, alias: str = None) -> str:
         Canonicalized SQL expression
     """
     col_ref = f"{alias}.{column}" if alias else column
-    return f"UPPER(TRIM(COALESCE(CAST({col_ref} AS STRING), '')))"
+    # Issue #2: Use '__NULL__' instead of empty string to avoid hash collisions
+    return f"UPPER(TRIM(COALESCE(CAST({col_ref} AS STRING), '__NULL__')))"
 
 
 def generate_pk_hash_expression(
@@ -48,9 +49,10 @@ def generate_pk_hash_expression(
         raise ValueError("primary_key_columns cannot be empty")
     
     canonicalized = [canonicalize_column(col, alias) for col in primary_key_columns]
-    concat_expr = " || '|' || ".join(canonicalized)
+    # Issue #5: Use CONCAT_WS per design doc
+    concat_expr = ", ".join(canonicalized)
     
-    return f"SHA2({concat_expr}, 256)"
+    return f"SHA2(CONCAT_WS('|', {concat_expr}), 256)"
 
 
 def generate_diff_hash_expression(
@@ -73,9 +75,10 @@ def generate_diff_hash_expression(
         raise ValueError("diff_columns cannot be empty")
     
     canonicalized = [canonicalize_column(col, alias) for col in diff_columns]
-    concat_expr = " || '|' || ".join(canonicalized)
+    # Issue #5: Use CONCAT_WS per design doc
+    concat_expr = ", ".join(canonicalized)
     
-    return f"SHA2({concat_expr}, 256)"
+    return f"SHA2(CONCAT_WS('|', {concat_expr}), 256)"
 
 
 def generate_hash_expressions_from_metadata(
@@ -94,8 +97,13 @@ def generate_hash_expressions_from_metadata(
     """
     hash_keys = metadata.get("hash_keys", {})
     
-    pk_columns = hash_keys.get("primary_key_columns", [])
-    diff_columns = hash_keys.get("diff_columns", [])
+    # Issue #1: Fix metadata structure mismatch
+    # Extract from nested structure per design doc
+    pk_config = hash_keys.get("_pk_hash", {})
+    diff_config = hash_keys.get("_diff_hash", {})
+    
+    pk_columns = pk_config.get("columns", [])
+    diff_columns = diff_config.get("track_columns", [])
     
     result = {}
     
@@ -120,8 +128,13 @@ class HashGenerator:
     def __init__(self, metadata: Dict[str, Any]):
         self.metadata = metadata
         self.hash_keys = metadata.get("hash_keys", {})
-        self._pk_columns = self.hash_keys.get("primary_key_columns", [])
-        self._diff_columns = self.hash_keys.get("diff_columns", [])
+        
+        # Issue #1: Fix metadata structure mismatch in Class as well
+        pk_config = self.hash_keys.get("_pk_hash", {})
+        diff_config = self.hash_keys.get("_diff_hash", {})
+        
+        self._pk_columns = pk_config.get("columns", [])
+        self._diff_columns = diff_config.get("track_columns", [])
     
     @property
     def pk_hash_expression(self) -> str:
