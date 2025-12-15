@@ -36,7 +36,22 @@ def read_reference_table(
     fq_table = env_config.get_fully_qualified_table(ref_schema, ref_name)
     
     logger.info(f"Reading reference table: {fq_table}")
+    
+    # Issue #8: Add error handling
+    if not spark.catalog.tableExists(fq_table):
+        logger.warning(f"Reference table does not exist: {fq_table}")
+        # We might want to raise error or return empty DF depending on strictness
+        # For now, raising error is safer
+        raise ValueError(f"Reference table does not exist: {fq_table}")
+
     df = spark.table(fq_table)
+    
+    # Issue #7: Add broadcast hint
+    # Default to True for reference tables as they are typically small lookup tables
+    if ref_config.get("broadcast", True):
+        from pyspark.sql import functions as F
+        df = F.broadcast(df)
+        logger.debug(f"Applied broadcast hint to {ref_name}")
     
     # Optionally select only needed columns
     columns = ref_config.get("columns")
@@ -63,20 +78,38 @@ def load_reference_tables(
     Returns:
         Dictionary mapping reference table names to DataFrames
     """
-    reference_joins = metadata.get("reference_joins", {})
+    # Issue #5: Fix reference_joins iteration (handle list vs dict)
+    reference_joins = metadata.get("reference_joins", [])
     
     if not reference_joins:
         logger.debug("No reference tables defined in metadata")
         return {}
     
     result = {}
-    for ref_name, ref_config in reference_joins.items():
-        result[ref_name] = read_reference_table(
-            spark,
-            ref_name,
-            ref_config,
-            env_config
-        )
+    
+    # Handle list (standard per design doc)
+    if isinstance(reference_joins, list):
+        for ref_config in reference_joins:
+            ref_name = ref_config.get("table")
+            if ref_name:
+                result[ref_name] = read_reference_table(
+                    spark,
+                    ref_name,
+                    ref_config,
+                    env_config
+                )
+            else:
+                logger.warning("Skipping reference join with missing 'table' key")
+                
+    # Handle dict (legacy support)
+    elif isinstance(reference_joins, dict):
+        for ref_name, ref_config in reference_joins.items():
+            result[ref_name] = read_reference_table(
+                spark,
+                ref_name,
+                ref_config,
+                env_config
+            )
     
     logger.info(f"Loaded {len(result)} reference tables")
     return result
