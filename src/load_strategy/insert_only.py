@@ -10,11 +10,9 @@ from typing import Dict, Any
 from pyspark.sql import DataFrame
 
 from load_strategy.base import LoadStrategy
-from load_strategy.factory import register_strategy
 from writer.delta_writer import write_insert
 
 
-@register_strategy("insert_only")
 class InsertOnlyStrategy(LoadStrategy):
     """
     Insert Only load strategy.

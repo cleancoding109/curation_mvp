@@ -147,7 +147,8 @@ def write_scd2(
     df: DataFrame,
     target_table: str,
     merge_keys: List[str],
-    scd2_columns: Dict[str, str]
+    scd2_columns: Dict[str, str],
+    merge_key_col: str = None
 ):
     """
     Write DataFrame to target table using SCD Type 2 (Merge-on-Read).
@@ -156,11 +157,9 @@ def write_scd2(
         spark: SparkSession instance
         df: DataFrame to write (Source)
         target_table: Fully qualified target table name
-        merge_keys: Business keys to join on
+        merge_keys: Business keys to join on (or PK hash if merge_key_col used)
         scd2_columns: Dictionary mapping logical names to physical columns
-                      {'effective_start_date': 'start_col', 
-                       'effective_end_date': 'end_col', 
-                       'is_current': 'curr_col'}
+        merge_key_col: Column in df to use for merge (if pre-staged)
     """
     from pyspark.sql import functions as F
     
@@ -173,6 +172,42 @@ def write_scd2(
     source_view = "_scd2_source"
     df.createOrReplaceTempView(source_view)
     
+    if merge_key_col:
+        # Optimized Path (Pre-staged)
+        # The source DF is already prepared with a merge_key column
+        # merge_key = PK Hash for updates (to close old record)
+        # merge_key = NULL for inserts (to create new record)
+        
+        target_key = merge_keys[0]
+        on_clause = f"target.{target_key} = source.{merge_key_col} AND target.{curr_col} = true"
+        
+        # UPDATE SET (Close old record)
+        update_set = f"""
+            target.{curr_col} = false,
+            target.{end_col} = source.{start_col}
+        """
+        
+        # INSERT VALUES (Create new record)
+        # Exclude merge_key_col from insert
+        insert_cols_list = [c for c in df.columns if c != merge_key_col]
+        insert_cols = ", ".join(insert_cols_list)
+        insert_vals = ", ".join([f"source.{c}" for c in insert_cols_list])
+        
+        merge_sql = f"""
+        MERGE INTO {target_table} AS target
+        USING {source_view} AS source
+        ON {on_clause}
+        WHEN MATCHED THEN 
+            UPDATE SET {update_set}
+        WHEN NOT MATCHED THEN 
+            INSERT ({insert_cols}) VALUES ({insert_vals})
+        """
+        
+        logger.info(f"Executing Optimized SCD2 MERGE into {target_table}")
+        spark.sql(merge_sql)
+        spark.catalog.dropTempView(source_view)
+        return
+
     # 1. Identify rows to UPDATE (close old records)
     # We need to join source with target to find records that exist and are current
     # but have changed (different hash or just new version)
@@ -380,7 +415,8 @@ class DeltaWriter:
         self,
         df: DataFrame,
         metadata: Dict[str, Any],
-        scd2_columns: Dict[str, str] = None
+        scd2_columns: Dict[str, str] = None,
+        merge_key_col: str = None
     ):
         """
         Write using SCD Type 2.
@@ -389,16 +425,22 @@ class DeltaWriter:
             df: DataFrame to write
             metadata: Table metadata dictionary
             scd2_columns: SCD2 column mapping
+            merge_key_col: Column in df to use for merge (if pre-staged)
         """
         target = self.get_target_table(metadata)
         
         load_strategy = metadata.get("load_strategy", {})
-        merge_keys = load_strategy.get("business_keys", [])
         
-        if not merge_keys:
-            raise ValueError("business_keys required for SCD2 operation")
+        if merge_key_col:
+            # If using pre-staged merge, we use _pk_hash as the target key
+            pk_hash = metadata.get("_pk_hash", "_pk_hash")
+            merge_keys = [pk_hash]
+        else:
+            merge_keys = load_strategy.get("business_keys", [])
+            if not merge_keys:
+                raise ValueError("business_keys required for SCD2 operation")
             
         if scd2_columns is None:
             scd2_columns = load_strategy.get("scd2_columns", {})
             
-        write_scd2(self.spark, df, target, merge_keys, scd2_columns)
+        write_scd2(self.spark, df, target, merge_keys, scd2_columns, merge_key_col)

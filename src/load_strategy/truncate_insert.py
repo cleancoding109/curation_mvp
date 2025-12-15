@@ -10,11 +10,9 @@ from typing import Dict, Any
 from pyspark.sql import DataFrame
 
 from load_strategy.base import LoadStrategy
-from load_strategy.factory import register_strategy
 from writer.delta_writer import write_truncate_insert
 
 
-@register_strategy("truncate_insert")
 class TruncateInsertStrategy(LoadStrategy):
     """
     Truncate-Insert load strategy.
