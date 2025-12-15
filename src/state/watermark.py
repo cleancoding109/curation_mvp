@@ -20,12 +20,39 @@ logger = get_logger(__name__)
 DEFAULT_CONTROL_TABLE = "standardized_data_layer.curation_watermarks"
 
 
+def parse_control_table(control_table: str, env_config: EnvironmentConfig) -> str:
+    """
+    Parse and fully qualify control table name.
+    
+    Args:
+        control_table: Control table name (e.g. "schema.table" or "table")
+        env_config: Environment configuration
+        
+    Returns:
+        Fully qualified table name
+    """
+    parts = control_table.split(".")
+    
+    if len(parts) == 1:
+        # Just table name, use default schema
+        return env_config.get_fully_qualified_table("standardized_data_layer", parts[0])
+    elif len(parts) == 2:
+        # schema.table
+        return env_config.get_fully_qualified_table(parts[0], parts[1])
+    elif len(parts) == 3:
+        # catalog.schema.table - already fully qualified
+        return control_table
+    else:
+        raise ValueError(f"Invalid control table name: {control_table}")
+
+
 def get_watermark(
     spark: SparkSession,
     table_name: str,
     env_config: EnvironmentConfig,
-    control_table: str = None
-) -> Optional[str]:
+    control_table: str = None,
+    default_watermark: str = "1970-01-01 00:00:00"
+) -> str:
     """
     Get the current watermark value for a table.
     
@@ -34,32 +61,39 @@ def get_watermark(
         table_name: Target table name
         env_config: Environment configuration
         control_table: Control table name (default: curation_watermarks)
+        default_watermark: Default value if no watermark exists
         
     Returns:
-        Watermark value or None if not found
+        Watermark value or default if not found
     """
     control = control_table or DEFAULT_CONTROL_TABLE
-    fq_control = env_config.get_fully_qualified_table(
-        control.split(".")[0],
-        control.split(".")[1]
-    )
+    fq_control = parse_control_table(control, env_config)
     
     try:
         df = spark.table(fq_control).filter(
             F.col("table_name") == table_name
         )
         
-        if df.count() == 0:
-            logger.info(f"No watermark found for table: {table_name}")
-            return None
+        # Issue #1: Remove eager count() - use first() instead
+        result = df.select("watermark_value").first()
         
-        watermark = df.select("watermark_value").first()[0]
+        if result is None:
+            logger.info(
+                f"No watermark found for table: {table_name}, "
+                f"using default: {default_watermark}"
+            )
+            return default_watermark
+        
+        watermark = result[0]
         logger.info(f"Current watermark for {table_name}: {watermark}")
         return watermark
         
     except Exception as e:
-        logger.warning(f"Could not read watermark: {e}")
-        return None
+        logger.warning(
+            f"Could not read watermark: {e}, "
+            f"using default: {default_watermark}"
+        )
+        return default_watermark
 
 
 def update_watermark(
@@ -72,6 +106,9 @@ def update_watermark(
     """
     Update the watermark value for a table.
     
+    IMPORTANT: This should only be called AFTER the target table MERGE succeeds.
+    Calling this before MERGE violates the failure-safe ordering principle.
+    
     Args:
         spark: SparkSession instance
         table_name: Target table name
@@ -80,22 +117,32 @@ def update_watermark(
         control_table: Control table name (default: curation_watermarks)
     """
     control = control_table or DEFAULT_CONTROL_TABLE
-    fq_control = env_config.get_fully_qualified_table(
-        control.split(".")[0],
-        control.split(".")[1]
-    )
+    fq_control = parse_control_table(control, env_config)
+    
+    # Issue #3: Monotonic Rule - Check if new value > current value
+    current = get_watermark(spark, table_name, env_config, control_table, default_watermark="")
+    if current and watermark_value <= current:
+        logger.warning(
+            f"Skipping watermark update for {table_name}: "
+            f"new value ({watermark_value}) <= current ({current})"
+        )
+        return
     
     update_time = datetime.utcnow().isoformat()
     
-    # Use MERGE to upsert watermark
+    # Issue #2: Fix SQL Injection Vulnerability
+    # Create a DataFrame for the source to avoid string interpolation of values
+    source_data = [(table_name, watermark_value, update_time)]
+    source_df = spark.createDataFrame(
+        source_data, 
+        ["table_name", "watermark_value", "updated_at"]
+    )
+    source_df.createOrReplaceTempView("watermark_source")
+    
+    # Use MERGE to upsert watermark using temp view
     merge_sql = f"""
     MERGE INTO {fq_control} AS target
-    USING (
-        SELECT 
-            '{table_name}' AS table_name,
-            '{watermark_value}' AS watermark_value,
-            '{update_time}' AS updated_at
-    ) AS source
+    USING watermark_source AS source
     ON target.table_name = source.table_name
     WHEN MATCHED THEN UPDATE SET
         watermark_value = source.watermark_value,
@@ -104,6 +151,7 @@ def update_watermark(
     """
     
     spark.sql(merge_sql)
+    spark.catalog.dropTempView("watermark_source")
     logger.info(f"Updated watermark for {table_name}: {watermark_value}")
 
 
@@ -121,11 +169,13 @@ def get_max_watermark_from_df(
     Returns:
         Max watermark value as string or None
     """
-    if df.count() == 0:
+    # Issue #1: Remove eager count()
+    result = df.agg(F.max(watermark_column)).first()
+    
+    if result is None or result[0] is None:
         return None
     
-    max_val = df.agg(F.max(watermark_column)).first()[0]
-    return str(max_val) if max_val else None
+    return str(result[0])
 
 
 def create_watermark_table(
@@ -142,19 +192,18 @@ def create_watermark_table(
         control_table: Control table name
     """
     control = control_table or DEFAULT_CONTROL_TABLE
-    fq_control = env_config.get_fully_qualified_table(
-        control.split(".")[0],
-        control.split(".")[1]
-    )
+    fq_control = parse_control_table(control, env_config)
     
+    # Issue #6: Fix CREATE TABLE syntax for Delta Lake
+    # Delta Lake doesn't support PRIMARY KEY constraints in CREATE TABLE
     create_sql = f"""
     CREATE TABLE IF NOT EXISTS {fq_control} (
         table_name STRING NOT NULL,
         watermark_value STRING,
-        updated_at TIMESTAMP,
-        CONSTRAINT pk_watermark PRIMARY KEY (table_name)
+        updated_at TIMESTAMP
     )
     USING DELTA
+    TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
     COMMENT 'Watermark tracking for curation framework'
     """
     
