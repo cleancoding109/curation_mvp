@@ -33,24 +33,33 @@ class TestHashGenerator:
 
 class TestTemplateResolver:
     def test_resolve_ref_list(self):
+        from src.transform.template_resolver import resolve_ref_placeholder
+        from src.config.environment import EnvironmentConfig
+        
         metadata = {
             "reference_joins": [
-                {"table_name": "ref_table", "schema": "ref_schema"}
+                {"table": "ref_table", "schema": "ref_schema"}
             ]
         }
-        resolver = TemplateResolver(metadata=metadata)
-        # Mock env config behavior if needed, or rely on default
-        # Assuming EnvironmentConfig works as expected or we mock it.
-        # Since we can't easily mock EnvironmentConfig without importing it, 
-        # let's just check if it calls get_fully_qualified_table correctly.
-        
-        # We can test the resolve_ref_placeholder function directly if we mock env_config
-        pass
+        env_config = EnvironmentConfig()
+        # Assuming default catalog is 'hive_metastore' or similar, or we can check suffix
+        resolved = resolve_ref_placeholder("ref_table", metadata, env_config)
+        assert "ref_schema.ref_table" in resolved
 
     def test_regex_patterns(self):
-        from src.transform.template_resolver import ALIAS_PATTERN, REF_PATTERN
+        from src.transform.template_resolver import PLACEHOLDER_PATTERN
         
-        assert ALIAS_PATTERN.match("alias:col1").group(1) == "col1"
-        assert ALIAS_PATTERN.match("alias:table.col1").group(1) == "table.col1"
+        assert PLACEHOLDER_PATTERN.match("{{alias:col1}}").group(1) == "alias:col1"
+
+    def test_resolve_generic_alias(self):
+        from src.transform.template_resolver import resolve_template
+        from src.config.environment import EnvironmentConfig
         
-        assert REF_PATTERN.match("ref:table1").group(1) == "table1"
+        metadata = {
+            "reference_joins": [
+                {"table": "adjuster_lookup", "alias": "adj"}
+            ]
+        }
+        template = "SELECT {{adj:name}} FROM table"
+        resolved = resolve_template(template, metadata, EnvironmentConfig())
+        assert resolved == "SELECT adj.name FROM table"

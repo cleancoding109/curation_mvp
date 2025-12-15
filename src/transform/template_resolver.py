@@ -17,8 +17,9 @@ logger = get_logger(__name__)
 
 # Regex patterns for placeholder extraction
 PLACEHOLDER_PATTERN = re.compile(r"\{\{([^}]+)\}\}")
-REF_PATTERN = re.compile(r"ref:([\w\.]+)")
-ALIAS_PATTERN = re.compile(r"alias:([\w\.]+)")
+# REF_PATTERN and ALIAS_PATTERN are no longer strictly needed with the new logic,
+# but kept for potential future use or if we revert to regex matching.
+# GENERIC_ALIAS_PATTERN is also superseded by the split logic.
 
 
 def resolve_source_placeholder(
@@ -82,7 +83,7 @@ def resolve_ref_placeholder(
     # Issue #3: Handle reference_joins as list of dicts per design doc
     if isinstance(reference_joins, list):
         for join in reference_joins:
-            if join.get("table_name") == ref_name:
+            if join.get("table") == ref_name:
                 ref_schema = join.get("schema", "standardized_data_layer")
                 return env_config.get_fully_qualified_table(ref_schema, ref_name)
     elif isinstance(reference_joins, dict):
@@ -179,20 +180,35 @@ def resolve_template(
     """
     context = build_placeholder_context(metadata, env_config)
     
+    # Issue #4: Build alias lookup for reference table columns
+    alias_lookup = set()
+    reference_joins = metadata.get("reference_joins", [])
+    if isinstance(reference_joins, list):
+        for join in reference_joins:
+            alias = join.get("alias")
+            if alias:
+                alias_lookup.add(alias)
+    
     def replace_placeholder(match):
         placeholder = match.group(1).strip()
         
-        # Check for ref: prefix
-        ref_match = REF_PATTERN.match(placeholder)
-        if ref_match:
-            ref_name = ref_match.group(1)
+        # Check for ref: prefix ({{ref:table_name}})
+        if placeholder.startswith("ref:"):
+            ref_name = placeholder.split(":", 1)[1]
             return resolve_ref_placeholder(ref_name, metadata, env_config)
         
-        # Check for alias: prefix
-        alias_match = ALIAS_PATTERN.match(placeholder)
-        if alias_match:
-            alias_name = alias_match.group(1)
-            return resolve_alias_placeholder(alias_name, metadata)
+        # Check for colon pattern
+        if ":" in placeholder:
+            prefix, suffix = placeholder.split(":", 1)
+            
+            # Check if prefix is a known alias from reference_joins
+            # Example: {{adj:adjuster_name}} -> adj.adjuster_name
+            if prefix in alias_lookup:
+                return f"{prefix}.{suffix}"
+            
+            # Check if it's the literal "alias" keyword for column mapping
+            if prefix == "alias":
+                return resolve_alias_placeholder(suffix, metadata)
         
         # Direct lookup in context
         if placeholder in context:
