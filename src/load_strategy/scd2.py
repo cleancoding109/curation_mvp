@@ -157,11 +157,13 @@ class SCD2Strategy(LoadStrategy):
             .drop("target_pk_hash")
         
         # Inserts (New versions)
+        # Issue #9: Fix inserts_df logic to only include new records (target_pk_hash IS NULL)
         # Filter out soft-deletes from being inserted as new versions
-        inserts_source = changes
+        inserts_source = changes.filter(F.col("target_pk_hash").isNull())
+        
         if "deleted_ind" in df.columns:
             # Handle boolean or string 'true'
-            inserts_source = changes.filter(
+            inserts_source = inserts_source.filter(
                 (F.col("deleted_ind") != True) & 
                 (F.lower(F.col("deleted_ind").cast("string")) != "true")
             )
@@ -180,9 +182,13 @@ class SCD2Strategy(LoadStrategy):
         else:
             eff_start = F.current_timestamp()
             
-        staged_df = staged_df.withColumn(start_col, eff_start) \
-                             .withColumn(end_col, F.lit(None).cast("timestamp")) \
-                             .withColumn(curr_col, F.lit(True))
+        # Issue #11: Only add SCD2 columns if they don't exist
+        if start_col not in staged_df.columns:
+            staged_df = staged_df.withColumn(start_col, eff_start)
+        if end_col not in staged_df.columns:
+            staged_df = staged_df.withColumn(end_col, F.lit(None).cast("timestamp"))
+        if curr_col not in staged_df.columns:
+            staged_df = staged_df.withColumn(curr_col, F.lit(True))
                              
         # Execute write
         self.writer.scd2(
