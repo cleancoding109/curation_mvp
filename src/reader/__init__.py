@@ -1,1 +1,1 @@
-# reader package
+"""\nReader Package\n\nSource and reference table readers.\n"""\n\nfrom reader.source_reader import (\n    read_source_table,\n    read_source_incremental,\n    SourceReader,\n)\nfrom reader.reference_reader import (\n    read_reference_table,\n    load_reference_tables,\n    ReferenceReader,\n)\n\n__all__ = [\n    "read_source_table",\n    "read_source_incremental",\n    "SourceReader",\n    "read_reference_table",\n    "load_reference_tables",\n    "ReferenceReader",\n]\n

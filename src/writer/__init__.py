@@ -1,1 +1,1 @@
-# writer package
+"""\nWriter Package\n\nDelta table write operations.\n"""\n\nfrom writer.delta_writer import (\n    write_insert,\n    write_merge,\n    write_delete_insert,\n    write_truncate_insert,\n    DeltaWriter,\n)\n\n__all__ = [\n    "write_insert",\n    "write_merge",\n    "write_delete_insert",\n    "write_truncate_insert",\n    "DeltaWriter",\n]\n
