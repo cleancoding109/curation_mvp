@@ -4,8 +4,6 @@ SQL Executor
 Executes resolved SQL queries via Spark and returns DataFrames.
 """
 
-from typing import Optional
-
 from pyspark.sql import DataFrame, SparkSession
 
 from utils.logging import get_logger
@@ -31,6 +29,9 @@ def execute_sql(
     """
     logger.info(f"Executing {description}")
     logger.debug(f"SQL:\n{sql[:500]}..." if len(sql) > 500 else f"SQL:\n{sql}")
+    
+    # Set job description for Spark UI observability
+    spark.sparkContext.setJobDescription(description)
     
     try:
         df = spark.sql(sql)
@@ -94,6 +95,14 @@ class SqlExecutor:
     def __init__(self, spark: SparkSession):
         self.spark = spark
         self._temp_views = []
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with cleanup."""
+        self.cleanup_temp_views()
     
     def execute(self, sql: str, description: str = "SQL query") -> DataFrame:
         """
