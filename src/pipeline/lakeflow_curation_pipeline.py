@@ -105,11 +105,17 @@ class LakeflowCurationPipeline:
         logger.info(f"New max watermark: {original_max_watermark}")
 
         # 3. Deduplicate RAW Source Data (before transformations)
-        # Optional: Only if business keys are defined
-        if metadata.get("business_key_columns"):
+        # Deduplication is optional and controlled by metadata
+        enable_deduplication = metadata.get("enable_deduplication", False)
+        business_keys = metadata.get("business_key_columns")
+        
+        if enable_deduplication and business_keys:
             df_deduped = deduplicate_from_metadata(df_source, metadata)
+        elif enable_deduplication and not business_keys:
+            logger.warning(f"Deduplication enabled for {table_name} but no business keys defined. Skipping.")
+            df_deduped = df_source
         else:
-            logger.debug(f"Skipping deduplication for {table_name} (no business keys defined)")
+            logger.debug(f"Deduplication skipped for {table_name} (enabled={enable_deduplication})")
             df_deduped = df_source
         
         # 4. Load Reference Tables (if any)
