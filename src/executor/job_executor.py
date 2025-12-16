@@ -88,8 +88,16 @@ def main():
         # Initialize Environment
         env_config = EnvironmentConfig()
         
-        # Initialize and Run Pipeline
-        pipeline = LakeflowCurationPipeline(spark, env_config)
+        # Determine Pipeline Type
+        pipeline_type = metadata.get("pipeline_type", "standardization")
+        logger.info(f"Initializing pipeline type: {pipeline_type}")
+        
+        if pipeline_type == "standardization":
+            pipeline = LakeflowCurationPipeline(spark, env_config)
+        else:
+            raise ValueError(f"Unknown pipeline type: {pipeline_type}")
+
+        # Run Pipeline
         pipeline.run([metadata])
         
         logger.info("Job completed successfully")

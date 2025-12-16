@@ -1,6 +1,7 @@
 {
   "table_name": "claims",
   "description": "Standardized Claims Data",
+  "pipeline_type": "standardization",
   "critical": true,
   "enable_deduplication": true,
   "transformation_sql_path": "query/claims.sql",
