@@ -110,7 +110,7 @@ class LakeflowCurationPipeline:
         # 4. Load Reference Tables (if any)
         reference_joins = metadata.get("reference_joins", [])
         if reference_joins:
-            load_reference_tables(self.spark, metadata, self.env_config)
+            load_reference_tables(self.spark, reference_joins, self.env_config)
 
         # 5. Apply Transformations (hash expressions resolved IN the SQL)
         # We register the deduped DF as a temp view so SQL can query it
@@ -125,7 +125,8 @@ class LakeflowCurationPipeline:
                 sql_path = f"query/{table_name}.sql"
             
             # Use custom config to handle __TEMP__ schema
-            temp_config = TempViewConfig(self.env_config.catalog, self.env_config.environment)
+            # We instantiate TempViewConfig with same params as EnvironmentConfig
+            # temp_config = TempViewConfig(self.env_config.catalog, self.env_config.environment)
             
             # Override source to point to temp view
             resolve_metadata = metadata.copy()
@@ -133,12 +134,16 @@ class LakeflowCurationPipeline:
             resolve_metadata["source_table"] = temp_view_name
             
             # Resolve template (includes hash generation!)
-            resolver = TemplateResolver(env_config=temp_config, metadata=resolve_metadata)
+            resolver = TemplateResolver(env_config=self.env_config, metadata=resolve_metadata)
             
             # Load and resolve SQL ({{_pk_hash}} and {{_diff_hash}} are resolved here!)
-            # We use load_and_resolve if path exists, else fallback or error
             try:
-                resolved_sql = resolver.load_and_resolve(sql_path, resolve_metadata)
+                # Load SQL file manually
+                with open(sql_path, 'r') as f:
+                    template_sql = f.read()
+                
+                # Resolve placeholders
+                resolved_sql = resolver.resolve(template_sql, resolve_metadata)
                 
                 # Execute transformation
                 df_transformed = execute_sql(
