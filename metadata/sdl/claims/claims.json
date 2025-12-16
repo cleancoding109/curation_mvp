@@ -1,14 +1,13 @@
 {
   "table_name": "claims",
   "description": "Standardized Claims Data",
-  "source": {
-    "schema": "unified_dev",
-    "table": "unified_claims_scd2"
-  },
-  "target": {
-    "schema": "standardized_data_layer",
-    "table": "claims"
-  },
+  "critical": true,
+  "enable_deduplication": true,
+  "transformation_sql_path": "query/claims.sql",
+  "source_schema": "unified_dev",
+  "source_table": "unified_claims_scd2",
+  "target_schema": "standardized_data_layer",
+  "target_table": "claims",
   "source_timezone": "America/New_York",
   "load_strategy": {
     "type": "scd2",
@@ -23,6 +22,8 @@
       "is_current": "is_current"
     }
   },
+  "business_key_columns": ["claim_id"],
+  "dedup_order_columns": ["event_timestamp DESC"],
   "hash_keys": {
     "_pk_hash": {
       "description": "Entity Hash (Merge Key)",
@@ -42,7 +43,9 @@
       "schema": "standardized_data_layer",
       "alias": "adj",
       "join_type": "LEFT",
-      "join_condition": "src.adjuster_id = adj.adjuster_id"
+      "join_condition": "src.adjuster_id = adj.adjuster_id",
+      "broadcast": true,
+      "columns": ["adjuster_id", "adjuster_name", "adjuster_region"]
     }
   ],
   "columns": [
