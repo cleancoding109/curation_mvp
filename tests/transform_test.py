@@ -1,4 +1,4 @@
-import pytest
+import pytest # type: ignore
 from src.transform.hash_generator import HashGenerator, canonicalize_column
 from src.transform.template_resolver import TemplateResolver
 

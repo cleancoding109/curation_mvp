@@ -49,9 +49,14 @@ class LoadStrategy(ABC):
     @property
     def target_table(self) -> str:
         """Get fully qualified target table name."""
-        target_schema = self.metadata.get("target_schema", "standardized_data_layer")
-        target_table = self.metadata.get("target_table", self.metadata.get("table_name"))
-        return self.env_config.get_fully_qualified_table(target_schema, target_table)
+        # Support both nested and flat metadata structure
+        if "target" in self.metadata:
+            target_schema = self.metadata["target"].get("schema", "standardized_data_layer")
+            target_table_name = self.metadata["target"].get("table", self.metadata.get("table_name"))
+        else:
+            target_schema = self.metadata.get("target_schema", "standardized_data_layer")
+            target_table_name = self.metadata.get("target_table", self.metadata.get("table_name"))
+        return self.env_config.get_fully_qualified_table(target_schema, target_table_name)
     
     @property
     def primary_key_columns(self) -> list:

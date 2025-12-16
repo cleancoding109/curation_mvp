@@ -4,32 +4,42 @@ bundle:
   name: curation_framework
   uuid: bd010e29-c5a7-4982-9b6d-903361ed833b
 
+variables:
+  catalog:
+    description: "Unity Catalog name"
+    default: "ltc_insurance_dev"
+
+workspace:
+  artifact_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/artifacts
+
 artifacts:
-  python_artifact:
+  default:
     type: whl
-    build: uv build --wheel
+    build: "uv build"
+    path: "."
+    dynamic_version: true
 
 include:
   - resources/*.yml
-  - resources/*/*.yml
+  - resources/**/*.yml
+  - resources/job/claims/*.yml
 
 targets:
   dev:
-    # The default target uses 'mode: development' to create a development copy.
-    # - Deployed resources get prefixed with '[dev my_user_name]'
-    # - Any job schedules and triggers are paused by default.
-    # See also https://docs.databricks.com/dev-tools/bundles/deployment-modes.html.
     mode: development
     default: true
     workspace:
       host: https://dbc-b2d72a44-d1b1.cloud.databricks.com
+    variables:
+      catalog: "ltc_insurance_dev"
 
   prod:
     mode: production
     workspace:
       host: https://dbc-b2d72a44-d1b1.cloud.databricks.com
-      # We explicitly deploy to /Workspace/Users/cleancoding109@gmail.com to make sure we only have a single copy.
       root_path: /Workspace/Users/cleancoding109@gmail.com/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: "ltc_insurance_prod"
     permissions:
       - user_name: cleancoding109@gmail.com
         level: CAN_MANAGE

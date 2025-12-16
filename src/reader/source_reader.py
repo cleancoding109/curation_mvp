@@ -72,8 +72,13 @@ def read_source_incremental(
     """
     from pyspark.sql import functions as F
     
-    source_schema = metadata.get("source_schema", "unified_dev")
-    source_table = metadata.get("source_table", metadata.get("table_name"))
+    # Support both nested and flat metadata structure
+    if "source" in metadata:
+        source_schema = metadata["source"].get("schema", "unified_dev")
+        source_table = metadata["source"].get("table", metadata.get("table_name"))
+    else:
+        source_schema = metadata.get("source_schema", "unified_dev")
+        source_table = metadata.get("source_table", metadata.get("table_name"))
     
     fq_table = env_config.get_fully_qualified_table(source_schema, source_table)
     

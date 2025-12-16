@@ -4,10 +4,18 @@
 resources:
   jobs:
     claims_daily:
-      name: "claims_daily"
-      description: "Daily incremental load for Claims domain - parallel execution"
+      name: "Claims Daily Incremental Load"
+      description: |
+        Daily incremental load for Claims domain tables.
+        Loads data from Bronze to Silver using Lakeflow Curation Framework.
+        Execution: Parallel with dependency ordering
+        Compute: Databricks Serverless
       
-      # Serverless compute for the job
+      # Job-level settings
+      timeout_seconds: 7200  # 2 hours
+      max_concurrent_runs: 1  # Prevent overlapping runs
+      
+      # Serverless compute
       queue:
         enabled: true
       
@@ -21,48 +29,76 @@ resources:
           default: "4"
         - name: fail_fast
           default: "true"
-
+        - name: catalog
+          default: "${var.catalog}"
+      
       # Email notifications
       email_notifications:
-        on_failure:
+        on_start:
+          - data-engineering-alerts@company.com
+        on_success:
           - data-engineering@company.com
-
+        on_failure:
+          - data-engineering-pagerduty@company.com
+          - data-engineering@company.com
+      
+      # Health monitoring
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 3600
+      
       # Schedule (daily at 6 AM UTC)
       schedule:
         quartz_cron_expression: "0 0 6 * * ?"
         timezone_id: "UTC"
         pause_status: PAUSED
-
-      # Tasks with dependencies
+      
+      # Tags
+      tags:
+        domain: claims
+        framework: curation
+        layer: silver
+        environment: "${bundle.target}"
+        cost_center: data_engineering
+      
+      # Tasks
       tasks:
-        - task_key: customer
-          description: "Load customer table to SDL"
-          python_wheel_task:
-            package_name: curation_framework
-            entry_point: job_executor
-            parameters:
-              - "--job_config=resources/job/claims/claims_daily.yml"
-              - "--table_name=customer"
-              - "--domain={{job.parameters.domain}}"
-          environment_key: default_env
-          
+        # Task 1: Load Claims table
         - task_key: claims
           description: "Load claims table to SDL"
-          depends_on:
-            - task_key: customer
-          python_wheel_task:
-            package_name: curation_framework
-            entry_point: job_executor
+          timeout_seconds: 1800
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+          
+          spark_python_task:
+            python_file: ../../../src/executor/job_executor.py
             parameters:
-              - "--job_config=resources/job/claims/claims_daily.yml"
-              - "--table_name=claims"
-              - "--domain={{job.parameters.domain}}"
+              - "--metadata_path=metadata/sdl/claims/claims.json"
+              - "--catalog={{job.parameters.catalog}}"
+          
           environment_key: default_env
 
-      # Environment with serverless
+        # Task 2: Load Customer table
+        - task_key: customer
+          description: "Load customer table to SDL"
+          timeout_seconds: 1800
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+          
+          spark_python_task:
+            python_file: ../../../src/executor/job_executor.py
+            parameters:
+              - "--metadata_path=metadata/sdl/claims/customer.json"
+          
+          environment_key: default_env
+      
+      # Environment configuration
       environments:
         - environment_key: default_env
           spec:
-            client: "1"
             dependencies:
-              - curation_framework
+              - ../../../dist/*.whl

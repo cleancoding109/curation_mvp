@@ -65,3 +65,29 @@ with this project. It's also possible to interact with it directly using the CLI
    ```
    $ uv run pytest
    ```
+
+## Recent Updates (Standardization Pipeline)
+
+The pipeline has been refactored to support a robust "Standardization" pattern.
+
+### Key Changes
+1.  **Pipeline Architecture**:
+    - **Dedup First**: Deduplication now happens *before* transformation to save compute.
+    - **Caching**: Source data is cached after reading to prevent re-reading during multiple passes (e.g., merge + watermark).
+    - **Safe Watermarking**: Watermarks are updated only *after* a successful merge.
+    - **Lazy Evaluation**: Transformations are defined lazily and executed during the write phase.
+
+2.  **Metadata Configuration**:
+    - Added `pipeline_type`: Set to `"standardization"` in `claims.json`.
+    - Added `watermark_column`: Configured as `_commit_timestamp`.
+    - Added `dedup_order_columns`: Configured with `_kafka_offset` as a tiebreaker.
+
+3.  **Job Execution**:
+    - `job_executor.py` now accepts a direct `--metadata_path` argument.
+    - `claims_daily.yml` is configured as a single-task job pointing to the `claims` metadata.
+
+### Running the Job
+To deploy and run the job:
+1.  Ensure your Databricks token is valid (`databricks auth login`).
+2.  Deploy the bundle: `databricks bundle deploy`.
+3.  Run the job: `databricks bundle run claims_daily`.
