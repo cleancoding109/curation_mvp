@@ -7,7 +7,7 @@ bundle:
 variables:
   catalog:
     description: "Unity Catalog name"
-    default: "ltc_insurance_dev"
+    default: "ltc_insurance"
 
 workspace:
   artifact_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/artifacts
@@ -24,6 +24,11 @@ include:
   - resources/**/*.yml
   - resources/job/claims/*.yml
 
+sync:
+  include:
+    - query/**
+    - metadata/**
+
 targets:
   dev:
     mode: development
@@ -31,7 +36,7 @@ targets:
     workspace:
       host: https://dbc-b2d72a44-d1b1.cloud.databricks.com
     variables:
-      catalog: "ltc_insurance_dev"
+      catalog: "ltc_insurance"
 
   prod:
     mode: production

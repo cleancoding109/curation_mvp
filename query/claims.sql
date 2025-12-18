@@ -1,6 +1,6 @@
 SELECT
-  {{_pk_hash}},
-  {{_diff_hash}},
+  {{_pk_hash}} AS _pk_hash,
+  {{_diff_hash}} AS _diff_hash,
   src.claim_id,
   src.claimant_id AS customer_id,
   src.policy_number,

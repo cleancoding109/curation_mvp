@@ -10,6 +10,7 @@ Orchestrates the end-to-end curation process:
 6. Update watermarks (failure-safe ordering)
 """
 
+import os
 import uuid
 from typing import Dict, Any, List, Optional
 
@@ -20,12 +21,20 @@ from reader.source_reader import read_source_incremental
 from reader.reference_reader import load_reference_tables
 from state.watermark import WatermarkManager, get_max_watermark_from_df
 from transform.template_resolver import TemplateResolver
+from config.metadata_loader import load_sql_template
 from transform.sql_executor import execute_sql
 from utils.dedup import deduplicate_from_metadata
 from load_strategy.factory import get_strategy_from_metadata
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _ensure_schema_exists(spark, catalog: str, schema: str):
+    """Create schema if missing to avoid SCHEMA_NOT_FOUND."""
+    fq_schema = f"{catalog}.{schema}"
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {fq_schema}")
+    logger.info(f"Ensured schema exists: {fq_schema}")
 
 
 class TempViewConfig(EnvironmentConfig):
@@ -48,6 +57,8 @@ class LakeflowCurationPipeline:
         self.spark = spark
         self.env_config = env_config or EnvironmentConfig()
         self.watermark_manager = WatermarkManager(self.spark, self.env_config)
+        self.temp_tables_created: List[str] = []
+        self._ensure_temp_schema()
 
     def run(self, metadata_list: List[Dict[str, Any]]):
         """
@@ -72,6 +83,23 @@ class LakeflowCurationPipeline:
                     logger.warning(f"Non-critical table {table_name} failed. Continuing.")
                     continue
 
+    def _ensure_temp_schema(self):
+        """Ensure temp schema exists for staging tables."""
+        temp_schema = f"{self.env_config.catalog}.temp"
+        self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS {temp_schema}")
+        logger.info(f"Ensured schema exists: {temp_schema}")
+
+    def _cleanup_temp_table(self, temp_table: Optional[str]):
+        if not temp_table:
+            return
+        try:
+            self.spark.sql(f"DROP TABLE IF EXISTS {temp_table}")
+            if temp_table in self.temp_tables_created:
+                self.temp_tables_created.remove(temp_table)
+            logger.info(f"Dropped temp table: {temp_table}")
+        except Exception as e:
+            logger.warning(f"Cleanup failed for temp table {temp_table}: {e}")
+
     def process_table(self, metadata: Dict[str, Any]):
         """
         Process a single table following failure-safe ordering.
@@ -81,6 +109,14 @@ class LakeflowCurationPipeline:
         """
         table_name = metadata.get("table_name")
         logger.info(f"Starting pipeline for table: {table_name}")
+
+        target_schema = metadata.get("target_schema", "standardized_data_layer")
+        # Ensure both target schema and watermark schema exist before use
+        _ensure_schema_exists(self.spark, self.env_config.catalog, target_schema)
+        _ensure_schema_exists(self.spark, self.env_config.catalog, "standardized_data_layer")
+
+        # Ensure watermark control table exists before reads/writes
+        self.watermark_manager.ensure_table_exists()
         
         # 1. Get Watermark
         watermark_value = self.watermark_manager.get(table_name)
@@ -121,7 +157,9 @@ class LakeflowCurationPipeline:
         # 4. Load Reference Tables (if any)
         reference_joins = metadata.get("reference_joins", [])
         if reference_joins:
-            load_reference_tables(self.spark, reference_joins, self.env_config)
+            load_reference_tables(self.spark, metadata, self.env_config)
+
+        temp_table: Optional[str] = None
 
         # 5. Apply Transformations (hash expressions resolved IN the SQL)
         # We register the deduped DF as a temp view so SQL can query it
@@ -134,6 +172,11 @@ class LakeflowCurationPipeline:
             if not sql_path:
                 # Default path convention
                 sql_path = f"query/{table_name}.sql"
+            
+            # Resolve sql_path using _base_path if available and path is relative
+            base_path = metadata.get("_base_path")
+            if base_path and not os.path.isabs(sql_path):
+                sql_path = os.path.join(base_path, sql_path)
             
             # Use custom config to handle __TEMP__ schema
             # We instantiate TempViewConfig with same params as EnvironmentConfig
@@ -149,10 +192,9 @@ class LakeflowCurationPipeline:
             
             # Load and resolve SQL ({{_pk_hash}} and {{_diff_hash}} are resolved here!)
             try:
-                # Load SQL file manually
-                with open(sql_path, 'r') as f:
-                    template_sql = f.read()
-                
+                # Load SQL template
+                template_sql = load_sql_template(sql_path)
+
                 # Resolve placeholders
                 resolved_sql = resolver.resolve(template_sql, resolve_metadata)
                 
@@ -162,34 +204,29 @@ class LakeflowCurationPipeline:
                     resolved_sql, 
                     f"Transformation for {table_name}"
                 )
-            except FileNotFoundError:
-                logger.warning(f"SQL file not found at {sql_path}. Using source data as-is.")
-                # If no SQL, we just use the deduped source
-                # But we still need to add hashes if they were expected to be in SQL
-                # If SQL is missing, we can't easily add hashes via SQL.
-                # We might need to fallback to DataFrame API for hashes if SQL is missing.
-                # For now, let's assume SQL is required for transformation + hashing.
-                # Or we can generate a default SQL: SELECT *, {{_pk_hash}} as _pk_hash ...
-                # Let's stick to the user's flow: if no SQL, use source as-is.
-                # But wait, if we use source as-is, we miss hashes!
-                # The user's design implies hashes are ALWAYS generated via SQL.
-                # So if SQL is missing, we probably should fail or generate a default one.
-                # Let's assume for now we just use df_deduped, but warn.
-                df_transformed = df_deduped
+            except FileNotFoundError as fnf_err:
+                logger.error(f"SQL file not found at {sql_path}", exc_info=True)
+                raise fnf_err
+            except Exception as transform_err:
+                logger.error("Failed to resolve or execute transformation SQL", exc_info=True)
+                raise transform_err
 
         finally:
             # Clean up temp view
             self.spark.catalog.dropTempView(temp_view_name)
-            
-        # 6. Cache for Deterministic Merge (prevents non-deterministic re-reads)
-        df_transformed.cache()
-        record_count = df_transformed.count()  # Materialize
-        logger.info(f"Cached {record_count:,} records for deterministic merge")
+        
+        # 6. Persist deterministically via temp table (serverless-safe)
+        temp_table = f"{self.env_config.catalog}.temp.staging_{table_name}_{uuid.uuid4().hex[:8]}"
+        self.temp_tables_created.append(temp_table)
+        df_transformed.write.mode("overwrite").saveAsTable(temp_table)
+        df_deterministic = self.spark.table(temp_table)
+        record_count = df_deterministic.count()
+        logger.info(f"Materialized {record_count:,} records via temp table {temp_table}")
         
         try:
             # 7. Apply Load Strategy (FIRST - merge before watermark update)
             strategy = get_strategy_from_metadata(self.spark, self.env_config, metadata)
-            strategy.execute(df_transformed)
+            strategy.execute(df_deterministic)
             logger.info(f"Successfully merged data for {table_name}")
             
             # 8. Update Watermark (SECOND - only if merge succeeded)
@@ -204,5 +241,4 @@ class LakeflowCurationPipeline:
             # Watermark NOT updated - next run will safely reprocess
             raise
         finally:
-            # Clean up cache
-            df_transformed.unpersist()
+            self._cleanup_temp_table(temp_table)

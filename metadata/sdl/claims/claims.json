@@ -4,7 +4,7 @@
   "pipeline_type": "standardization",
   "critical": true,
   "enable_deduplication": true,
-  "watermark_column": "_commit_timestamp",
+  "watermark_column": "ingestion_timestamp",
   "lookback_interval": "2 HOURS",
   "transformation_sql_path": "query/claims.sql",
   "source_schema": "unified_dev",
@@ -28,7 +28,7 @@
   "business_key_columns": ["claim_id"],
   "dedup_order_columns": [
     "event_timestamp DESC",
-    "_kafka_offset DESC"
+    "ingestion_timestamp DESC"
   ],
   "hash_keys": {
     "_pk_hash": {

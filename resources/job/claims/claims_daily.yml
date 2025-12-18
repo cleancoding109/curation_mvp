@@ -78,21 +78,7 @@ resources:
             parameters:
               - "--metadata_path=metadata/sdl/claims/claims.json"
               - "--catalog={{job.parameters.catalog}}"
-          
-          environment_key: default_env
-
-        # Task 2: Load Customer table
-        - task_key: customer
-          description: "Load customer table to SDL"
-          timeout_seconds: 1800
-          max_retries: 2
-          min_retry_interval_millis: 60000
-          retry_on_timeout: true
-          
-          spark_python_task:
-            python_file: ../../../src/executor/job_executor.py
-            parameters:
-              - "--metadata_path=metadata/sdl/claims/customer.json"
+              - "--base_path=${workspace.file_path}"
           
           environment_key: default_env
       
@@ -100,5 +86,6 @@ resources:
       environments:
         - environment_key: default_env
           spec:
+            client: "3"
             dependencies:
               - ../../../dist/*.whl

@@ -1,14 +1,11 @@
 {
   "table_name": "customer",
   "description": "Standardized Customer Data",
-  "source": {
-    "schema": "unified_dev",
-    "table": "unified_customer_scd2"
-  },
-  "target": {
-    "schema": "standardized_data_layer",
-    "table": "customer"
-  },
+  "pipeline_type": "standardization",
+  "source_schema": "unified_dev",
+  "source_table": "unified_customer_scd2",
+  "target_schema": "standardized_data_layer",
+  "target_table": "customer",
   "source_timezone": "America/New_York",
   "load_strategy": {
     "type": "scd2",
@@ -23,6 +20,7 @@
       "is_current": "is_current"
     }
   },
+  "business_key_columns": ["customer_id"],
   "hash_keys": {
     "_pk_hash": {
       "description": "Entity Hash (Merge Key)",
@@ -56,9 +54,9 @@
     { "source_col": "st.region", "target_col": "region", "type": "string", "from_reference": true },
     { "source_col": "zip_code", "target_col": "postal_code", "type": "string" },
     { "source_col": "status", "target_col": "customer_status", "type": "string" },
-    { 
-      "source_col": "last_login", 
-      "target_col": "last_login_at_utc", 
+    {
+      "source_col": "last_login",
+      "target_col": "last_login_at_utc",
       "type": "timestamp",
       "transform": "to_utc",
       "source_timezone": "America/New_York"

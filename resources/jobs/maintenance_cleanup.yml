@@ -1,0 +1,22 @@
+resources:
+  jobs:
+    temp_table_cleanup:
+      name: "Temp Table Cleanup"
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: "UTC"
+      queue:
+        enabled: true
+      tasks:
+        - task_key: cleanup
+          spark_python_task:
+            python_file: ../../src/utils/cleanup_job.py
+            parameters:
+              - "--catalog={{var.catalog}}"
+          environment_key: default_env
+      environments:
+        - environment_key: default_env
+          spec:
+            client: "3"
+            dependencies:
+              - ../../dist/*.whl

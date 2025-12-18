@@ -7,11 +7,11 @@ Loads metadata, initializes environment, and triggers the pipeline.
 
 import argparse
 import os
-import sys
 from datetime import datetime
 from typing import Dict, Any
 
 from pyspark.sql import SparkSession
+from pyspark.sql import types as T
 
 from pipeline.lakeflow_curation_pipeline import LakeflowCurationPipeline
 from config.environment import EnvironmentConfig
@@ -58,28 +58,10 @@ def _resolve_metadata_path(path: str) -> str:
 
 def validate_metadata(metadata: Dict[str, Any]) -> None:
     """Validate metadata has required fields and correct structure."""
-    required_fields = ["table_name", "load_strategy"]
-    
-    # Check for required top-level fields
-    missing = [f for f in required_fields if f not in metadata]
+    required_fields = ["table_name", "load_strategy", "source_schema", "source_table", "target_schema", "target_table"]
+    missing = [f for f in required_fields if not metadata.get(f)]
     if missing:
         raise ValueError(f"Missing required metadata fields: {missing}")
-    
-    # Check for source config (nested or flat structure)
-    if "source" in metadata:
-        source = metadata["source"]
-        if "schema" not in source or "table" not in source:
-            raise ValueError("source.schema and source.table are required")
-    elif "source_schema" not in metadata or "source_table" not in metadata:
-        raise ValueError("source configuration (source.schema/table or source_schema/source_table) is required")
-    
-    # Check for target config (nested or flat structure)
-    if "target" in metadata:
-        target = metadata["target"]
-        if "schema" not in target or "table" not in target:
-            raise ValueError("target.schema and target.table are required")
-    elif "target_schema" not in metadata or "target_table" not in metadata:
-        raise ValueError("target configuration (target.schema/table or target_schema/target_table) is required")
     
     load_strategy = metadata.get("load_strategy", {})
     if "type" not in load_strategy:
@@ -106,18 +88,29 @@ def write_audit_log(
 ):
     """Write execution audit log to audit table."""
     try:
+        audit_schema = T.StructType([
+            T.StructField("table_name", T.StringType(), False),
+            T.StructField("status", T.StringType(), False),
+            T.StructField("start_time", T.TimestampType(), False),
+            T.StructField("end_time", T.TimestampType(), False),
+            T.StructField("duration_seconds", T.DoubleType(), False),
+            T.StructField("records_processed", T.LongType(), False),
+            T.StructField("error_message", T.StringType(), True),
+            T.StructField("execution_timestamp", T.TimestampType(), False),
+        ])
+
         audit_data = [{
             "table_name": table_name,
             "status": status,
             "start_time": start_time,
             "end_time": end_time,
             "duration_seconds": (end_time - start_time).total_seconds(),
-            "records_processed": records_processed,
+            "records_processed": int(records_processed or 0),
             "error_message": error_message,
             "execution_timestamp": datetime.now()
         }]
         
-        audit_df = spark.createDataFrame(audit_data)
+        audit_df = spark.createDataFrame(audit_data, schema=audit_schema)
         audit_table = f"{catalog}.standardized_data_layer.curation_audit_log"
         
         if spark.catalog.tableExists(audit_table):
@@ -140,12 +133,17 @@ def main():
     
     parser.add_argument("--metadata_path", required=True, help="Path to metadata JSON file")
     parser.add_argument("--catalog", required=False, help="Unity Catalog name")
+    parser.add_argument("--base_path", required=False, help="Base path for resolving relative file paths (e.g., workspace files root)")
     
     args = parser.parse_args()
+    
+    # Determine base path for file resolution
+    base_path = args.base_path or os.getcwd()
     
     logger.info("=" * 80)
     logger.info(f"Starting Lakeflow Curation Job")
     logger.info(f"Metadata path: {args.metadata_path}")
+    logger.info(f"Base path: {base_path}")
     logger.info("=" * 80)
     
     start_time = datetime.now()
@@ -181,9 +179,15 @@ def main():
         logger.info(f"Environment: {environment}")
         logger.info(f"Catalog: {catalog}")
         
-        # Load table metadata
-        metadata_path = _resolve_metadata_path(args.metadata_path)
+        # Load table metadata using base_path
+        if os.path.isabs(args.metadata_path):
+            metadata_path = args.metadata_path
+        else:
+            metadata_path = os.path.join(base_path, args.metadata_path)
         metadata = load_metadata_file(metadata_path)
+        
+        # Store base_path in metadata for downstream path resolution
+        metadata["_base_path"] = base_path
         table_name = metadata.get("table_name")
         if not table_name:
             raise ValueError("table_name is required in metadata")
@@ -216,8 +220,6 @@ def main():
         # Write audit log
         write_audit_log(spark, catalog, table_name, "SUCCESS", start_time, end_time, records_processed)
         
-        sys.exit(0)
-        
     except Exception as e:
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -229,8 +231,7 @@ def main():
         
         if spark and table_name:
             write_audit_log(spark, catalog, table_name, "FAILED", start_time, end_time, error_message=str(e))
-        
-        sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":
