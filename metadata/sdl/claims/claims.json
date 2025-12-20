@@ -33,16 +33,19 @@
   "hash_keys": {
     "_pk_hash": {
       "description": "Entity Hash (Merge Key)",
+      "target_col": "row_hash",
       "algorithm": "SHA2-256",
       "columns": ["claim_id", "source_system"]
     },
     "_diff_hash": {
       "description": "Change Hash (SCD2 Change Detection)",
+      "target_col": "business_diff_hash",
       "algorithm": "SHA2-256",
       "track_columns": ["claimant_id", "policy_number", "claim_type", "step_name", "step_status", "adjuster_id", "claim_decision", "denial_reason", "claim_amount", "approved_amount", "event_timestamp"]
     }
   },
   "source_system_column": "source_system",
+  "source_timestamp_column": "event_timestamp_utc",
   "reference_joins": [
     {
       "table": "adjuster_lookup",
@@ -53,28 +56,5 @@
       "broadcast": true,
       "columns": ["adjuster_id", "adjuster_name", "adjuster_region"]
     }
-  ],
-  "columns": [
-    { "source_col": "claim_id", "target_col": "claim_id", "type": "string" },
-    { "source_col": "claimant_id", "target_col": "customer_id", "type": "string" },
-    { "source_col": "policy_number", "target_col": "policy_number", "type": "string" },
-    { "source_col": "claim_type", "target_col": "claim_type", "type": "string" },
-    { "source_col": "step_name", "target_col": "workflow_step", "type": "string" },
-    { "source_col": "step_status", "target_col": "workflow_status", "type": "string" },
-    { "source_col": "adjuster_id", "target_col": "adjuster_id", "type": "string" },
-    { "source_col": "adj.adjuster_name", "target_col": "adjuster_name", "type": "string", "from_reference": true },
-    { "source_col": "adj.adjuster_region", "target_col": "adjuster_region", "type": "string", "from_reference": true },
-    { "source_col": "claim_decision", "target_col": "decision", "type": "string" },
-    { "source_col": "denial_reason", "target_col": "denial_reason", "type": "string" },
-    { "source_col": "claim_amount", "target_col": "requested_amount", "type": "decimal(10,2)" },
-    { "source_col": "approved_amount", "target_col": "approved_amount", "type": "decimal(10,2)" },
-    { 
-      "source_col": "event_timestamp", 
-      "target_col": "event_at_utc", 
-      "type": "timestamp",
-      "transform": "to_utc",
-      "source_timezone": "America/New_York"
-    },
-    { "source_col": "source_system", "target_col": "source_system", "type": "string" }
   ]
 }

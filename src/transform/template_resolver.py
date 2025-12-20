@@ -164,8 +164,13 @@ def build_placeholder_context(
     # Hash expressions with 'src' alias to avoid ambiguous column references
     # When queries have JOINs, columns must be qualified with table alias
     hash_exprs = generate_hash_expressions_from_metadata(metadata, alias="src")
-    context["_pk_hash"] = hash_exprs.get("_pk_hash", "NULL")
-    context["_diff_hash"] = hash_exprs.get("_diff_hash", "NULL")
+    
+    hash_keys = metadata.get("hash_keys", {})
+    pk_col = hash_keys.get("_pk_hash", {}).get("target_col", "_pk_hash")
+    diff_col = hash_keys.get("_diff_hash", {}).get("target_col", "_diff_hash")
+    
+    context["_pk_hash"] = hash_exprs.get(pk_col, "NULL")
+    context["_diff_hash"] = hash_exprs.get(diff_col, "NULL")
     
     # SCD2 columns if passthrough mode
     scd2_mode = metadata.get("scd2_mode", "framework_managed")

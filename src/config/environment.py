@@ -89,5 +89,9 @@ class EnvironmentConfig:
         """
         return f"{self.catalog}.{schema}.{table}"
     
+    def get_default_schema(self) -> str:
+        """Get default target schema."""
+        return os.environ.get("DEFAULT_TARGET_SCHEMA", "standardized_data_layer")
+
     def __repr__(self) -> str:
         return f"EnvironmentConfig(catalog={self.catalog}, environment={self.environment})"

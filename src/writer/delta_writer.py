@@ -164,9 +164,12 @@ def write_scd2(
     from pyspark.sql import functions as F
     
     # Extract column names
-    start_col = scd2_columns.get("effective_start_date", "effective_start_date")
-    end_col = scd2_columns.get("effective_end_date", "effective_end_date")
-    curr_col = scd2_columns.get("is_current", "is_current")
+    start_col = scd2_columns.get("effective_start_date")
+    end_col = scd2_columns.get("effective_end_date")
+    curr_col = scd2_columns.get("is_current")
+    
+    if not all([start_col, end_col, curr_col]):
+         raise ValueError("SCD2 columns (effective_start_date, effective_end_date, is_current) must be defined in metadata")
     
     # Register source as temp view
     source_view = "_scd2_source"
@@ -179,13 +182,18 @@ def write_scd2(
         # merge_key = NULL for inserts (to create new record)
         
         target_key = merge_keys[0]
-        on_clause = f"target.{target_key} = source.{merge_key_col} AND target.{curr_col} = true"
         
-        # UPDATE SET (Close old record)
-        update_set = f"""
-            target.{curr_col} = false,
-            target.{end_col} = source.{start_col}
-        """
+        if curr_col:
+            on_clause = f"target.{target_key} = source.{merge_key_col} AND target.{curr_col} = true"
+            update_set = f"""
+                target.{curr_col} = false,
+                target.{end_col} = source.{start_col}
+            """
+        else:
+            on_clause = f"target.{target_key} = source.{merge_key_col} AND target.{end_col} IS NULL"
+            update_set = f"""
+                target.{end_col} = source.{start_col}
+            """
         
         # INSERT VALUES (Create new record)
         # Exclude merge_key_col from insert
@@ -194,12 +202,12 @@ def write_scd2(
         insert_vals = ", ".join([f"source.{c}" for c in insert_cols_list])
         
         merge_sql = f"""
-        MERGE INTO {target_table} AS target
+        MERGE WITH SCHEMA EVOLUTION INTO {target_table} AS target
         USING {source_view} AS source
         ON {on_clause}
-        WHEN MATCHED THEN 
+        WHEN MATCHED THEN
             UPDATE SET {update_set}
-        WHEN NOT MATCHED THEN 
+        WHEN NOT MATCHED THEN
             INSERT ({insert_cols}) VALUES ({insert_vals})
         """
         
@@ -274,16 +282,20 @@ def write_scd2(
     
     # ON condition: Match on generated merge keys AND target is current
     on_clause = " AND ".join([f"target.{k} = staged.merge_{k}" for k in merge_keys])
-    on_clause += f" AND target.{curr_col} = true"
     
-    # UPDATE clause (Close record)
-    # Set end_date to source's start_date (which is the new version's start)
-    # Set is_current to false
-    update_clause = f"""
-        UPDATE SET 
-            target.{curr_col} = false,
-            target.{end_col} = staged.{start_col}
-    """
+    if curr_col:
+        on_clause += f" AND target.{curr_col} = true"
+        update_clause = f"""
+            UPDATE SET
+                target.{curr_col} = false,
+                target.{end_col} = staged.{start_col}
+        """
+    else:
+        on_clause += f" AND target.{end_col} IS NULL"
+        update_clause = f"""
+            UPDATE SET
+                target.{end_col} = staged.{start_col}
+        """
     
     # INSERT clause (New record)
     insert_cols_str = ", ".join(source_cols)
@@ -335,7 +347,7 @@ class DeltaWriter:
         Returns:
             Fully qualified table name
         """
-        target_schema = metadata.get("target_schema", "standardized_data_layer")
+        target_schema = metadata.get("target_schema", self.env_config.get_default_schema())
         target_table = metadata.get("target_table", metadata.get("table_name"))
         return self.env_config.get_fully_qualified_table(target_schema, target_table)
     

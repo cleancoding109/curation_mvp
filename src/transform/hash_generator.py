@@ -105,15 +105,18 @@ def generate_hash_expressions_from_metadata(
     pk_columns = pk_config.get("columns", [])
     diff_columns = diff_config.get("track_columns", [])
     
+    pk_col_name = pk_config.get("target_col", "_pk_hash")
+    diff_col_name = diff_config.get("target_col", "_diff_hash")
+    
     result = {}
     
     if pk_columns:
-        result["_pk_hash"] = generate_pk_hash_expression(pk_columns, alias)
-        logger.debug(f"Generated _pk_hash from columns: {pk_columns}")
+        result[pk_col_name] = generate_pk_hash_expression(pk_columns, alias)
+        logger.debug(f"Generated {pk_col_name} from columns: {pk_columns}")
     
     if diff_columns:
-        result["_diff_hash"] = generate_diff_hash_expression(diff_columns, alias)
-        logger.debug(f"Generated _diff_hash from columns: {diff_columns}")
+        result[diff_col_name] = generate_diff_hash_expression(diff_columns, alias)
+        logger.debug(f"Generated {diff_col_name} from columns: {diff_columns}")
     
     return result
 
@@ -162,12 +165,18 @@ class HashGenerator:
         """
         expressions = []
         
+        pk_config = self.hash_keys.get("_pk_hash", {})
+        diff_config = self.hash_keys.get("_diff_hash", {})
+        
+        pk_col_name = pk_config.get("target_col", "_pk_hash")
+        diff_col_name = diff_config.get("target_col", "_diff_hash")
+
         if self._pk_columns:
             pk_expr = generate_pk_hash_expression(self._pk_columns, alias)
-            expressions.append(f"{pk_expr} AS _pk_hash")
+            expressions.append(f"{pk_expr} AS {pk_col_name}")
         
         if self._diff_columns:
             diff_expr = generate_diff_hash_expression(self._diff_columns, alias)
-            expressions.append(f"{diff_expr} AS _diff_hash")
+            expressions.append(f"{diff_expr} AS {diff_col_name}")
         
         return ",\n    ".join(expressions)
