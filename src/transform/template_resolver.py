@@ -3,23 +3,21 @@ Template Resolver
 
 Loads SQL template files and resolves {{...}} placeholders using metadata.
 Supports source references, reference table joins, column aliases, and hash expressions.
+
+NOTE: {{source}} placeholders should be replaced BEFORE calling this resolver
+when using temp views in the pipeline.
 """
 
 import re
-from typing import Dict, Any, Optional
-
+from typing import Dict, Any
 from config.environment import EnvironmentConfig
 from transform.hash_generator import generate_hash_expressions_from_metadata
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-
-# Regex patterns for placeholder extraction
+# Regex pattern for placeholder extraction
 PLACEHOLDER_PATTERN = re.compile(r"\{\{([^}]+)\}\}")
-# REF_PATTERN and ALIAS_PATTERN are no longer strictly needed with the new logic,
-# but kept for potential future use or if we revert to regex matching.
-# GENERIC_ALIAS_PATTERN is also superseded by the split logic.
 
 
 def resolve_source_placeholder(
@@ -29,15 +27,21 @@ def resolve_source_placeholder(
     """
     Resolve {{source}} to fully qualified source table name.
     
+    NOTE: If using temp views in pipeline, replace {{source}} manually
+    BEFORE calling this resolver.
+    
     Args:
         metadata: Table metadata dictionary
         env_config: Environment configuration with catalog
-        
+    
     Returns:
         Fully qualified table name (catalog.schema.table)
     """
-    source_schema = metadata.get("source_schema", "unified_dev")
+    source_schema = metadata.get("source_schema")
     source_table = metadata.get("source_table", metadata.get("table_name"))
+    
+    if not source_schema:
+        raise ValueError("source_schema must be specified in metadata")
     
     return env_config.get_fully_qualified_table(source_schema, source_table)
 
@@ -52,12 +56,15 @@ def resolve_target_placeholder(
     Args:
         metadata: Table metadata dictionary
         env_config: Environment configuration with catalog
-        
+    
     Returns:
         Fully qualified table name (catalog.schema.table)
     """
-    target_schema = metadata.get("target_schema", "standardized_data_layer")
+    target_schema = metadata.get("target_schema")
     target_table = metadata.get("target_table", metadata.get("table_name"))
+    
+    if not target_schema:
+        raise ValueError("target_schema must be specified in metadata")
     
     return env_config.get_fully_qualified_table(target_schema, target_table)
 
@@ -74,27 +81,42 @@ def resolve_ref_placeholder(
         ref_name: Reference table name
         metadata: Table metadata dictionary
         env_config: Environment configuration with catalog
-        
+    
     Returns:
         Fully qualified reference table name
     """
     reference_joins = metadata.get("reference_joins", [])
     
-    # Issue #3: Handle reference_joins as list of dicts per design doc
+    # Default to target_schema for reference tables
+    default_ref_schema = metadata.get("target_schema")
+    
+    # Handle reference_joins as list of dicts
     if isinstance(reference_joins, list):
         for join in reference_joins:
             if join.get("table") == ref_name:
-                ref_schema = join.get("schema", "standardized_data_layer")
+                # Use schema from join config, or fallback to default
+                ref_schema = join.get("schema", default_ref_schema)
                 return env_config.get_fully_qualified_table(ref_schema, ref_name)
+    
     elif isinstance(reference_joins, dict):
-        # Legacy support
+        # Legacy support for dict format
         if ref_name in reference_joins:
             ref_config = reference_joins[ref_name]
-            ref_schema = ref_config.get("schema", "standardized_data_layer")
+            ref_schema = ref_config.get("schema", default_ref_schema)
             return env_config.get_fully_qualified_table(ref_schema, ref_name)
     
-    # Default: assume reference tables are in standardized_data_layer
-    return env_config.get_fully_qualified_table("standardized_data_layer", ref_name)
+    # Fallback: use target_schema
+    if not default_ref_schema:
+        raise ValueError(
+            f"Cannot resolve reference table '{ref_name}': "
+            f"no schema specified in join config or metadata"
+        )
+    
+    logger.warning(
+        f"Reference table '{ref_name}' not found in reference_joins, "
+        f"using default schema: {default_ref_schema}"
+    )
+    return env_config.get_fully_qualified_table(default_ref_schema, ref_name)
 
 
 def resolve_alias_placeholder(
@@ -107,7 +129,7 @@ def resolve_alias_placeholder(
     Args:
         alias_name: Source column name
         metadata: Table metadata dictionary
-        
+    
     Returns:
         Target column name
     """
@@ -125,7 +147,7 @@ def build_placeholder_context(
     Args:
         metadata: Table metadata dictionary
         env_config: Environment configuration
-        
+    
     Returns:
         Dictionary mapping placeholder keys to resolved values
     """
@@ -139,8 +161,9 @@ def build_placeholder_context(
     # Metadata-driven placeholders
     context["source_timezone"] = metadata.get("source_timezone", "UTC")
     
-    # Hash expressions
-    hash_exprs = generate_hash_expressions_from_metadata(metadata)
+    # Hash expressions with 'src' alias to avoid ambiguous column references
+    # When queries have JOINs, columns must be qualified with table alias
+    hash_exprs = generate_hash_expressions_from_metadata(metadata, alias="src")
     context["_pk_hash"] = hash_exprs.get("_pk_hash", "NULL")
     context["_diff_hash"] = hash_exprs.get("_diff_hash", "NULL")
     
@@ -162,25 +185,26 @@ def resolve_template(
     Resolve all placeholders in a SQL template.
     
     Supports:
-    - {{source}} - Source table
+    - {{source}} - Source table (replace manually for temp views!)
     - {{target}} - Target table
     - {{ref:table_name}} - Reference tables
     - {{alias:column}} - Column aliases
-    - {{_pk_hash}} - Primary key hash expression
-    - {{_diff_hash}} - Diff hash expression
+    - {{adj:column_name}} - Reference table column (adj.column_name)
+    - {{_pk_hash}} - Primary key hash expression (with src. qualification)
+    - {{_diff_hash}} - Diff hash expression (with src. qualification)
     - {{source_timezone}} - Source timezone
     
     Args:
         sql_template: SQL template string with placeholders
         metadata: Table metadata dictionary
         env_config: Environment configuration
-        
+    
     Returns:
         Resolved SQL string
     """
     context = build_placeholder_context(metadata, env_config)
     
-    # Issue #4: Build alias lookup for reference table columns
+    # Build alias lookup for reference table columns
     alias_lookup = set()
     reference_joins = metadata.get("reference_joins", [])
     if isinstance(reference_joins, list):
@@ -220,7 +244,6 @@ def resolve_template(
     
     resolved = PLACEHOLDER_PATTERN.sub(replace_placeholder, sql_template)
     logger.debug(f"Resolved SQL template ({len(sql_template)} -> {len(resolved)} chars)")
-    
     return resolved
 
 
@@ -246,7 +269,7 @@ class TemplateResolver:
         Args:
             sql_template: SQL template string
             metadata: Optional metadata override
-            
+        
         Returns:
             Resolved SQL string
         """
@@ -264,12 +287,11 @@ class TemplateResolver:
         Args:
             sql_path: Path to SQL template file
             metadata: Optional metadata override
-            
+        
         Returns:
             Resolved SQL string
         """
         from config.metadata_loader import load_sql_template
-        
         sql_template = load_sql_template(sql_path)
         return self.resolve(sql_template, metadata)
     
@@ -279,7 +301,7 @@ class TemplateResolver:
         
         Args:
             metadata: Optional metadata override
-            
+        
         Returns:
             Dictionary of placeholder resolutions
         """
