@@ -7,7 +7,7 @@ from utils.temp_table_cleanup import TempTableCleaner
 def main():
     parser = argparse.ArgumentParser(description="Cleanup temp staging tables")
     parser.add_argument("--catalog", required=True)
-    parser.add_argument("--schema", default="temp")
+    parser.add_argument("--schema", default="standardized_data_layer")
     parser.add_argument("--older_than_hours", type=int, default=24)
     args = parser.parse_args()
 

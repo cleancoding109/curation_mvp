@@ -15,7 +15,7 @@ class TempTableCleaner:
         dropped = 0
 
         for table in tables:
-            if not table.tableName.startswith("staging_"):
+            if not table.tableName.startswith("temp_"):
                 continue
             try:
                 desc = self.spark.sql(
